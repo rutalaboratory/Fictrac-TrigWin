@@ -245,6 +245,25 @@ The output data file can be used for offline processing. To use FicTrac within a
 
 **Note:** If you encounter issues trying to generate output videos (i.e. `save_raw` or `save_debug`), you might try changing the default video codec via `vid_codec` - see [config params](doc/params.md) for details. If you receive an error about a missing [H264 library](https://github.com/cisco/openh264/releases), you can download the necessary library (i.e. OpenCV 3.4.3 requires `openh264-1.7.0-win64.dll`) from the above link and place it in the `bin` folder under the FicTrac directory.
 
+### Sample parity regression
+
+This fork carries a native offline parity gate for the bundled sample video in `tests/test_sample_parity.py`.
+
+Contract:
+
+1. Run the native Windows binary against `sample/sample.mp4` with `do_display = n`.
+2. Require exactly `300` output rows.
+3. Canonicalize each `.dat` row by ignoring columns `22`, `24`, and `25`, which are runtime-dependent timestamps.
+4. Compare the resulting SHA-256 signature against the checked-in baseline.
+
+Run it from the FicTrac root with:
+
+```
+pytest tests/test_sample_parity.py -q
+```
+
+This is intended to catch native tracking regressions on the validated Windows toolchain before and after source edits. It is not a cross-platform golden-data guarantee.
+
 ## Research
 
 If you use FicTrac as part of your research, please cite the original FicTrac publication:
