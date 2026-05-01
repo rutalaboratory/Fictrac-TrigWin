@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <deque>
+#include <cstdint>
 
 ///
 /// 
@@ -45,6 +46,13 @@ public:
     bool getNextFrameSet(cv::Mat& frame, cv::Mat& remap, double& timestamp, double& ms_since_midnight) {
         return getFrameSet(frame, remap, timestamp, ms_since_midnight, false);
     }
+    long long getCapturedFrameCount() const { return _captured_frame_count; }
+    long long getDeliveredFrameCount() const { return _delivered_frame_count; }
+    long long getSourceGrabbedFrameCount() const { return _source ? _source->getGrabbedFrameCount() : 0; }
+    double getSourceFirstGrabbedTimestamp() const { return _source ? _source->getFirstGrabbedTimestamp() : -1; }
+    double getSourceLastGrabbedTimestamp() const { return _source ? _source->getLastGrabbedTimestamp() : -1; }
+    double getSourceFirstGrabbedMsSinceMidnight() const { return _source ? _source->getFirstGrabbedMsSinceMidnight() : -1; }
+    double getSourceLastGrabbedMsSinceMidnight() const { return _source ? _source->getLastGrabbedMsSinceMidnight() : -1; }
 
 private:
     /// Worker function.
@@ -77,4 +85,6 @@ private:
     /// Output queues.
     std::deque<cv::Mat> _frame_q, _remap_q;
     std::deque<double> _ts_q, _ms_q;
+    long long _captured_frame_count = 0;
+    long long _delivered_frame_count = 0;
 };

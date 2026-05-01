@@ -11,6 +11,9 @@
 #include "Logger.h"
 #include "timing.h"
 
+#include <algorithm>
+#include <string>
+
 #if defined(PGR_USB3)
 #include "SpinGenApi/SpinnakerGenApi.h"
 using namespace Spinnaker;
@@ -20,10 +23,12 @@ using namespace FlyCapture2;
 
 using cv::Mat;
 
-PGRSource::PGRSource(int index)
+PGRSource::PGRSource(int index, long int first_frame_timeout_ms)
 {
     try {
 #if defined(PGR_USB3)
+    _first_frame_timeout_ms = first_frame_timeout_ms;
+
         // Retrieve singleton reference to system object
         _system = System::GetInstance();
 
@@ -87,6 +92,13 @@ PGRSource::PGRSource(int index)
         _width = _cam->Width();
         _height = _cam->Height();
         _fps = getFPS();
+
+        if (_first_frame_timeout_ms <= 0) {
+            LOG("PGR first-frame wait configured to wait indefinitely for the first trigger");
+        }
+        else {
+            LOG("PGR first-frame wait configured to %ld ms", _first_frame_timeout_ms);
+        }
 #elif defined(PGR_USB2)
         LOG_DBG("Looking for camera at index %d...", index);
 
@@ -171,6 +183,21 @@ PGRSource::~PGRSource()
         _open = false;
     }
 
+#if defined(PGR_USB3)
+    if ((_cam != NULL) && !_camera_deinitialized) {
+        try {
+            _cam->DeInit();
+            _camera_deinitialized = true;
+        }
+        catch (Spinnaker::Exception& e) {
+            LOG_ERR("Error deinitializing camera! Error was: %s", e.what());
+        }
+        catch (...) {
+            LOG_ERR("Error deinitializing camera!");
+        }
+    }
+#endif // PGR_USB3
+
 #if defined(PGR_USB2)
     _cam->Disconnect();
 #endif // PGR_USB2
@@ -235,11 +262,59 @@ bool PGRSource::grab(cv::Mat& frame)
 
 #if defined(PGR_USB3)
     ImagePtr pgr_image = NULL;
+    bool allow_terminal_drain_retry = _received_first_frame;
 
     try {
         // Retrieve next received image
         long int timeout = _fps > 0 ? std::max(static_cast<long int>(1000), static_cast<long int>(1000. / _fps)) : 1000; // set capture timeout to at least 1000 ms
-        pgr_image = _cam->GetNextImage(timeout);
+        while (true) {
+            try {
+                if (!_received_first_frame && (_first_frame_timeout_ms <= 0)) {
+                    pgr_image = _cam->GetNextImage();
+                }
+                else {
+                    long int request_timeout = timeout;
+                    if (!_received_first_frame) {
+                        request_timeout = std::max(request_timeout, _first_frame_timeout_ms);
+                    }
+                    else if (!allow_terminal_drain_retry) {
+                        request_timeout = 20;
+                    }
+                    pgr_image = _cam->GetNextImage(request_timeout);
+                }
+                break;
+            }
+            catch (Spinnaker::Exception& e) {
+                const std::string message = e.what();
+                if (message.find("NEW_BUFFER_DATA") != std::string::npos) {
+                    if (allow_terminal_drain_retry) {
+                        LOG("PGR trigger stream reported end-of-buffer; making one short drain attempt before closing.");
+                        allow_terminal_drain_retry = false;
+                        continue;
+                    }
+                    LOG("PGR trigger stream ended; closing camera cleanly.");
+                    try {
+                        _cam->EndAcquisition();
+                    }
+                    catch (...) {
+                    }
+                    if (!_camera_deinitialized) {
+                        try {
+                            _cam->DeInit();
+                            _camera_deinitialized = true;
+                        }
+                        catch (...) {
+                        }
+                    }
+                    _open = false;
+                    if (pgr_image != NULL) {
+                        pgr_image->Release();
+                    }
+                    return false;
+                }
+                throw;
+            }
+        }
         double ts = ts_ms();    // backup, in case the device timestamp is junk
         _ms_since_midnight = ms_since_midnight();
         _timestamp = pgr_image->GetTimeStamp();
@@ -255,21 +330,36 @@ bool PGRSource::grab(cv::Mat& frame)
             pgr_image->Release();
             return false;
         }
+
+        _received_first_frame = true;
+        _grabbed_frame_count++;
+        if (_grabbed_frame_count == 1) {
+            _first_grabbed_timestamp = _timestamp;
+            _first_grabbed_ms_since_midnight = _ms_since_midnight;
+        }
+        _last_grabbed_timestamp = _timestamp;
+        _last_grabbed_ms_since_midnight = _ms_since_midnight;
     }
     catch (Spinnaker::Exception& e) {
         LOG_ERR("Error grabbing frame! Error was: %s", e.what());
-        pgr_image->Release();
+        if (pgr_image != NULL) {
+            pgr_image->Release();
+        }
         return false;
     }
     catch (...) {
         LOG_ERR("Error grabbing frame!");
-        pgr_image->Release();
+        if (pgr_image != NULL) {
+            pgr_image->Release();
+        }
         return false;
     }
 
     try {
         // Convert image
-        ImagePtr bgr_image = pgr_image->Convert(PixelFormat_BGR8, NEAREST_NEIGHBOR);
+        ImageProcessor processor;
+        processor.SetColorProcessing(SPINNAKER_COLOR_PROCESSING_ALGORITHM_NEAREST_NEIGHBOR);
+        ImagePtr bgr_image = processor.Convert(pgr_image, PixelFormat_BGR8);
 
         Mat tmp(_height, _width, CV_8UC3, bgr_image->GetData(), bgr_image->GetStride());
         tmp.copyTo(frame);
@@ -281,12 +371,16 @@ bool PGRSource::grab(cv::Mat& frame)
     }
     catch (Spinnaker::Exception& e) {
         LOG_ERR("Error converting frame! Error was: %s", e.what());
-        pgr_image->Release();
+        if (pgr_image != NULL) {
+            pgr_image->Release();
+        }
         return false;
     }
     catch (...) {
         LOG_ERR("Error converting frame!");
-        pgr_image->Release();
+        if (pgr_image != NULL) {
+            pgr_image->Release();
+        }
         return false;
     }
 #elif defined(PGR_USB2)

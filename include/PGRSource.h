@@ -21,7 +21,8 @@
 
 class PGRSource : public FrameSource {
 public:
-	PGRSource(int index=0);
+    static constexpr long int DEFAULT_FIRST_FRAME_TIMEOUT_MS = 30000;
+    PGRSource(int index=0, long int first_frame_timeout_ms=30000);
 	virtual ~PGRSource();
 
     virtual double getFPS();
@@ -34,6 +35,9 @@ private:
     Spinnaker::SystemPtr _system;
     Spinnaker::CameraList _camList;
     Spinnaker::CameraPtr _cam;
+    long int _first_frame_timeout_ms = DEFAULT_FIRST_FRAME_TIMEOUT_MS;
+    bool _received_first_frame = false;
+    bool _camera_deinitialized = false;
 #elif defined(PGR_USB2)
     std::shared_ptr<FlyCapture2::Camera> _cam;
 #endif // PGR_USB2/3

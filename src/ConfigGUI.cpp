@@ -155,10 +155,19 @@ void createZoomROI(Mat& zoom_roi, const Mat& frame, const Point2d& pt, int orig_
 ConfigGui::ConfigGui(string config_fn, string src_override)
 : _config_fn(config_fn)
 {
+    int first_frame_timeout_ms = 0;
+
     /// Load and parse config file.
     if (_cfg.read(_config_fn) <= 0) {
         LOG_ERR("Error! Could not read from config file (%s).", _config_fn.c_str());
         return;
+    }
+
+    if (_cfg.getInt("src_first_frame_timeout_ms", first_frame_timeout_ms)) {
+        // use configured value
+    }
+    else {
+        _cfg.add("src_first_frame_timeout_ms", first_frame_timeout_ms);
     }
 
     /// Read source file name.
@@ -178,7 +187,7 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
         if (input_fn.size() > 2) { throw std::exception(); }
         // first try reading input as camera id
         int id = std::stoi(input_fn);
-        _source = std::make_shared<PGRSource>(id);
+        _source = std::make_shared<PGRSource>(id, static_cast<long int>(first_frame_timeout_ms));
     }
     catch (...) {
         // then try loading as video file
@@ -409,7 +418,12 @@ bool ConfigGui::run()
     /// Get a frame.
     Mat frame;
     if (!_source->grab(frame)) {
-        LOG_ERR("Error! Could not grab input frame.");
+        if (_source->isLive()) {
+            LOG_ERR("Error! Could not grab input frame. Live triggered cameras must already be receiving trigger pulses before configGui starts.");
+        }
+        else {
+            LOG_ERR("Error! Could not grab input frame.");
+        }
         return false;
     }
     if ((frame.cols != _w) || (frame.rows != _h)) {

@@ -26,6 +26,7 @@
 #include <atomic>
 #include <deque>
 #include <vector>
+#include <fstream>
 
 ///
 /// Estimate track ball orientation and update surface map.
@@ -112,6 +113,12 @@ private:
     void updateSphere();
     void updatePath();
     bool logData();
+    bool openRawFrameRecording(const std::string& exec_time, int width, int height, double fps);
+    bool writeRawFrameRecord(const cv::Mat& frame, unsigned int log_frame);
+    bool openRawFrameChunk();
+    void closeRawFrameChunk();
+    void writeRawFrameManifest() const;
+    void finalizeRawFrameRecording();
 
 private:
     /// Drawing
@@ -137,6 +144,12 @@ private:
     std::deque<cv::Mat> _R_roi_hist;
     std::deque<CmPoint64f> _pos_heading_hist;
     cv::VideoWriter _debug_vid, _raw_vid;
+    std::unique_ptr<std::ofstream> _raw_chunk_stream, _raw_index_stream;
+    std::string _raw_stream_base, _raw_manifest_fn, _raw_index_fn;
+    std::vector<std::string> _raw_chunk_fns;
+    int _raw_frame_width, _raw_frame_height, _raw_frame_channels;
+    int _raw_frame_count, _raw_chunk_index, _raw_chunk_frame_count;
+    double _raw_frame_fps;
 
     std::unique_ptr<std::thread> _drawThread;
 

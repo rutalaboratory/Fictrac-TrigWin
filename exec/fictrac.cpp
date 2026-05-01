@@ -16,9 +16,9 @@
 
 using namespace std;
 
-/// Ctrl-c handling
-bool _active = true;
-void ctrlcHandler(int /*signum*/) { _active = false; }
+/// Console-signal handling.
+volatile std::sig_atomic_t _active = 1;
+void ctrlcHandler(int /*signum*/) { _active = 0; }
 
 
 int main(int argc, char *argv[])
@@ -68,8 +68,11 @@ int main(int argc, char *argv[])
     /// Set logging level.
     Logger::setVerbosity(log_level);
 
-	// Catch cntl-c
+	// Catch console stop signals and let Trackball unwind cleanly.
     signal(SIGINT, ctrlcHandler);
+#ifdef _WIN32
+    signal(SIGBREAK, ctrlcHandler);
+#endif
 
 	/// Set high priority (when run as SU).
     if (!SetProcessHighPriority()) {

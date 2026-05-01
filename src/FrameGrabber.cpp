@@ -17,6 +17,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/videoio.hpp>
 
+#include <chrono>
 #include <cmath>    // round
 #include <string>
 
@@ -163,6 +164,8 @@ bool FrameGrabber::getFrameSet(Mat& frame, Mat& remap, double& timestamp, double
         }
     }
 
+    _delivered_frame_count++;
+
     // wake processing thread
     _qCond.notify_all();
 
@@ -214,7 +217,11 @@ void FrameGrabber::process()
 
     /// Frame grab loop.
     int cnt = 0;
+    const double nominal_period_ms = (_source && (_source->getFPS() > 0)) ? (1000.0 / _source->getFPS()) : 0.0;
+    double max_cycle_ms = 0.0;
+    long long over_period_cycles = 0;
     while (_active) {
+        const auto cycle_start = std::chrono::steady_clock::now();
         /// Wait until we need to capture a new frame.
         unique_lock<mutex> l(_qMutex);
         while (_active && (_max_buf_len > 0) && (_frame_q.size() >= _max_buf_len)) {
@@ -229,6 +236,8 @@ void FrameGrabber::process()
         if (!_source->grab(frame_bgr) || ((_max_frame_cnt > 0) && (++cnt > _max_frame_cnt))) {
             if ((_max_frame_cnt > 0) && (++cnt > _max_frame_cnt)) {
                 LOG("Max frame count (%d) reached!", _max_frame_cnt);
+            } else if (!_source->isOpen()) {
+                LOG("Input stream ended.");
             } else {
                 LOG_ERR("Error grabbing new frame!");
             }
@@ -240,6 +249,7 @@ void FrameGrabber::process()
         }
         double timestamp = _source->getTimestamp();
         double ms_since_midnight = _source->getMsSinceMidnight();
+        _captured_frame_count++;
 
         /// Create output remap image in the loop.
         Mat remap_grey(_rh, _rw, CV_8UC1);
@@ -318,6 +328,7 @@ void FrameGrabber::process()
                         if ((g > max) && (g < 255)) { max = g; }	// ignore overexposed regions
                         if (g < min) { min = g; }
                     }
+
                 }
                 else {
                     // pre-fill next cols
@@ -382,9 +393,25 @@ void FrameGrabber::process()
         _qCond.notify_all();
         size_t q_size = _frame_q.size();
         l.unlock();
+
+        const double cycle_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - cycle_start
+        ).count();
+        if (cycle_ms > max_cycle_ms) {
+            max_cycle_ms = cycle_ms;
+        }
+        if ((nominal_period_ms > 0.0) && (cycle_ms > nominal_period_ms)) {
+            over_period_cycles++;
+        }
         
         LOG_DBG("Processed frame added to input queue (l = %zd).", q_size);
     }
 
+    LOG(
+        "FrameGrabber cycle timing: nominal_period=%.3f ms max_cycle=%.3f ms over_period_cycles=%lld",
+        nominal_period_ms,
+        max_cycle_ms,
+        over_period_cycles
+    );
     LOG_DBG("Stopping frame grabbing loop!");
 }

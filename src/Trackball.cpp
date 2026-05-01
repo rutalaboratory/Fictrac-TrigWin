@@ -29,6 +29,7 @@
 #include <opencv2/videoio.hpp>
 
 #include <sstream>
+#include <iomanip>
 #include <cmath>
 #include <exception>
 
@@ -59,6 +60,7 @@ const int COM_BAUD_DEFAULT = 115200;
 const bool DO_DISPLAY_DEFAULT = true;
 const bool SAVE_RAW_DEFAULT = false;
 const bool SAVE_DEBUG_DEFAULT = false;
+const int RAW_FRAME_CHUNK_CAPACITY = 512;
 
 /// OpenCV codecs for video writing
 const vector<vector<std::string>> CODECS = {
@@ -119,7 +121,15 @@ Trackball::Trackball(string cfg_fn, string src_override)
         // first try reading input as camera id
         int id = std::stoi(src_fn);
 #if defined(PGR_USB2) || defined(PGR_USB3)
-        source = make_shared<PGRSource>(id);
+        long int first_frame_timeout_ms = PGRSource::DEFAULT_FIRST_FRAME_TIMEOUT_MS;
+        int configured_first_frame_timeout_ms = static_cast<int>(first_frame_timeout_ms);
+        if (_cfg.getInt("src_first_frame_timeout_ms", configured_first_frame_timeout_ms)) {
+            first_frame_timeout_ms = static_cast<long int>(configured_first_frame_timeout_ms);
+        }
+        else {
+            _cfg.add("src_first_frame_timeout_ms", configured_first_frame_timeout_ms);
+        }
+        source = make_shared<PGRSource>(id, first_frame_timeout_ms);
 #elif defined(BASLER_USB3)
         source = make_shared<BaslerSource>(id);
 #endif // PGR/BASLER
@@ -492,15 +502,12 @@ Trackball::Trackball(string cfg_fn, string src_override)
 
         // raw input video
         if (_save_raw) {
-            string vid_fn = _base_fn + "-raw-" + exec_time + "." + fext;
             double fps = source->getFPS();
             if (fps <= 0) {
                 fps = (src_fps > 0) ? src_fps : 25;   // if we can't get fps from source, then use fps from config or - if not specified - default to 25 fps.
             }
-            LOG_DBG("Opening %s for video writing (%s %dx%d @ %f FPS)", vid_fn.c_str(), cstr.c_str(), source->getWidth(), source->getHeight(), fps);
-            _raw_vid.open(vid_fn, fourcc, fps, cv::Size(source->getWidth(), source->getHeight()));
-            if (!_raw_vid.isOpened()) {
-                LOG_ERR("Error! Unable to open raw output video (%s).", vid_fn.c_str());
+            LOG_DBG("Opening %s for chunked raw frame writing (%dx%d @ %f FPS)", (_base_fn + "-raw-" + exec_time).c_str(), source->getWidth(), source->getHeight(), fps);
+            if (!openRawFrameRecording(exec_time, source->getWidth(), source->getHeight(), fps)) {
                 _active = false;
                 return;
             }
@@ -522,13 +529,15 @@ Trackball::Trackball(string cfg_fn, string src_override)
             }
         }
 
-        // create output file containing log lines corresponding to video frames, for synching video output
-        string fn = _base_fn + "-vidLogFrames-" + exec_time + ".txt";
-        _vid_frames = make_unique<Recorder>(RecorderInterface::RecordType::FILE, fn);
-        if (!_vid_frames->is_active()) {
-            LOG_ERR("Error! Unable to open output video frame number log file (%s).", fn.c_str());
-            _active = false;
-            return;
+        // create output file containing log lines corresponding to debug-video frames, for synching video output
+        if (_save_debug) {
+            string fn = _base_fn + "-vidLogFrames-" + exec_time + ".txt";
+            _vid_frames = make_unique<Recorder>(RecorderInterface::RecordType::FILE, fn);
+            if (!_vid_frames->is_active()) {
+                LOG_ERR("Error! Unable to open output video frame number log file (%s).", fn.c_str());
+                _active = false;
+                return;
+            }
         }
     }
 
@@ -573,6 +582,7 @@ Trackball::~Trackball()
 
     _init = false;
     _active = false;
+    _drawCond.notify_all();
 
     if (_thread && _thread->joinable()) {
         _thread->join();
@@ -581,6 +591,198 @@ Trackball::~Trackball()
     if (_do_display && _drawThread && _drawThread->joinable()) {
         _drawThread->join();
     }
+
+    finalizeRawFrameRecording();
+}
+
+static string jsonEscape(const string& value)
+{
+    string out;
+    out.reserve(value.size() + 8);
+    for (char ch : value) {
+        switch (ch) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += ch; break;
+        }
+    }
+    return out;
+}
+
+bool Trackball::openRawFrameChunk()
+{
+    closeRawFrameChunk();
+
+    _raw_chunk_index++;
+    _raw_chunk_frame_count = 0;
+
+    ostringstream chunk_name;
+    chunk_name << _raw_stream_base << "-chunk" << setw(6) << setfill('0') << _raw_chunk_index << ".bin";
+    string chunk_fn = chunk_name.str();
+
+    _raw_chunk_stream = make_unique<ofstream>(chunk_fn, ios::binary | ios::out | ios::trunc);
+    if (!_raw_chunk_stream->is_open()) {
+        LOG_ERR("Error! Unable to open raw frame chunk (%s).", chunk_fn.c_str());
+        _raw_chunk_stream.reset();
+        return false;
+    }
+
+    _raw_chunk_fns.push_back(chunk_fn);
+    LOG_DBG("Opened raw frame chunk %d (%s).", _raw_chunk_index, chunk_fn.c_str());
+    return true;
+}
+
+void Trackball::closeRawFrameChunk()
+{
+    if (_raw_chunk_stream) {
+        LOG_DBG("Closing raw frame chunk %d after %d frame(s).", _raw_chunk_index, _raw_chunk_frame_count);
+        _raw_chunk_stream->flush();
+        _raw_chunk_stream->close();
+        _raw_chunk_stream.reset();
+    }
+}
+
+void Trackball::writeRawFrameManifest() const
+{
+    if (_raw_manifest_fn.empty()) {
+        return;
+    }
+
+    ofstream manifest(_raw_manifest_fn, ios::out | ios::trunc);
+    if (!manifest.is_open()) {
+        return;
+    }
+
+    manifest << "{\n";
+    manifest << "  \"format\": \"raw-bgr8-chunks\",\n";
+    manifest << "  \"frame_width\": " << _raw_frame_width << ",\n";
+    manifest << "  \"frame_height\": " << _raw_frame_height << ",\n";
+    manifest << "  \"channels\": " << _raw_frame_channels << ",\n";
+    manifest << "  \"dtype\": \"uint8\",\n";
+    manifest << "  \"fps\": " << fixed << setprecision(6) << _raw_frame_fps << ",\n";
+    manifest << "  \"chunk_frame_capacity\": " << RAW_FRAME_CHUNK_CAPACITY << ",\n";
+    manifest << "  \"saved_frames\": " << _raw_frame_count << ",\n";
+    manifest << "  \"frame_index_path\": \"" << jsonEscape(_raw_index_fn) << "\",\n";
+    manifest << "  \"manifest_path\": \"" << jsonEscape(_raw_manifest_fn) << "\",\n";
+    manifest << "  \"chunk_paths\": [\n";
+    for (size_t i = 0; i < _raw_chunk_fns.size(); ++i) {
+        manifest << "    \"" << jsonEscape(_raw_chunk_fns[i]) << "\"";
+        if (i + 1 < _raw_chunk_fns.size()) {
+            manifest << ",";
+        }
+        manifest << "\n";
+    }
+    manifest << "  ]\n";
+    manifest << "}\n";
+}
+
+bool Trackball::openRawFrameRecording(const string& exec_time, int width, int height, double fps)
+{
+    _raw_stream_base = _base_fn + "-raw-" + exec_time;
+    _raw_manifest_fn = _raw_stream_base + ".json";
+    _raw_index_fn = _raw_stream_base + "-index.csv";
+    _raw_chunk_fns.clear();
+    _raw_frame_width = width;
+    _raw_frame_height = height;
+    _raw_frame_channels = 0;
+    _raw_frame_fps = fps;
+    _raw_frame_count = 0;
+    _raw_chunk_index = -1;
+    _raw_chunk_frame_count = 0;
+
+    _raw_index_stream = make_unique<ofstream>(_raw_index_fn, ios::out | ios::trunc);
+    if (!_raw_index_stream->is_open()) {
+        LOG_ERR("Error! Unable to open raw frame index (%s).", _raw_index_fn.c_str());
+        _raw_index_stream.reset();
+        return false;
+    }
+    (*_raw_index_stream) << "frame_index,log_frame,chunk_index,chunk_frame_index\n";
+    LOG_DBG("Opened raw frame index (%s).", _raw_index_fn.c_str());
+
+    if (!openRawFrameChunk()) {
+        _raw_index_stream.reset();
+        return false;
+    }
+
+    writeRawFrameManifest();
+    LOG_DBG("Raw frame recording ready: %dx%d channels=%d fps=%.6f", _raw_frame_width, _raw_frame_height, _raw_frame_channels, _raw_frame_fps);
+    return true;
+}
+
+bool Trackball::writeRawFrameRecord(const Mat& frame, unsigned int log_frame)
+{
+    if (!_raw_chunk_stream || !_raw_index_stream) {
+        return false;
+    }
+
+    if (_raw_frame_channels <= 0) {
+        _raw_frame_channels = frame.channels();
+        writeRawFrameManifest();
+    }
+
+    if (_raw_chunk_frame_count >= RAW_FRAME_CHUNK_CAPACITY) {
+        writeRawFrameManifest();
+        if (!openRawFrameChunk()) {
+            return false;
+        }
+    }
+
+    Mat contiguous = frame.isContinuous() ? frame : frame.clone();
+    const size_t frame_bytes = contiguous.total() * contiguous.elemSize();
+    _raw_chunk_stream->write(reinterpret_cast<const char*>(contiguous.data), static_cast<std::streamsize>(frame_bytes));
+    if (!_raw_chunk_stream->good()) {
+        LOG_ERR("Error! Failed while writing raw frame chunk (%s).", _raw_chunk_fns.back().c_str());
+        return false;
+    }
+
+    (*_raw_index_stream) << _raw_frame_count << "," << log_frame << "," << _raw_chunk_index << "," << _raw_chunk_frame_count << "\n";
+    if (!_raw_index_stream->good()) {
+        LOG_ERR("Error! Failed while writing raw frame index (%s).", _raw_index_fn.c_str());
+        return false;
+    }
+
+    _raw_frame_count++;
+    _raw_chunk_frame_count++;
+    if ((_raw_frame_count % 64) == 0) {
+        _raw_chunk_stream->flush();
+        _raw_index_stream->flush();
+        writeRawFrameManifest();
+        LOG_DBG(
+            "Flushed raw frame stream at frame_index=%d log_frame=%u chunk_index=%d chunk_frame_index=%d.",
+            _raw_frame_count - 1,
+            log_frame,
+            _raw_chunk_index,
+            _raw_chunk_frame_count - 1
+        );
+    }
+    return true;
+}
+
+void Trackball::finalizeRawFrameRecording()
+{
+    if (!_save_raw) {
+        return;
+    }
+
+    LOG(
+        "Finalizing raw frame recording with %d saved frame(s) across %zu chunk(s); current chunk=%d current chunk frames=%d.",
+        _raw_frame_count,
+        _raw_chunk_fns.size(),
+        _raw_chunk_index,
+        _raw_chunk_frame_count
+    );
+    closeRawFrameChunk();
+    if (_raw_index_stream) {
+        LOG("Closing raw frame index (%s).", _raw_index_fn.c_str());
+        _raw_index_stream->flush();
+        _raw_index_stream->close();
+        _raw_index_stream.reset();
+    }
+    writeRawFrameManifest();
+    LOG("Wrote raw frame manifest (%s) with saved_frames=%d.", _raw_manifest_fn.c_str(), _raw_frame_count);
 }
 
 ///
@@ -681,6 +883,11 @@ void Trackball::process()
             _data.seq++;
         }
 
+        if (_save_raw && !writeRawFrameRecord(_src_frame, _data.cnt)) {
+            LOG_ERR("Error! Unable to persist raw frame stream.");
+            terminate();
+        }
+
         if (_do_display) {
             auto data = make_shared<DrawData>();
             data->log_frame = _data.cnt;
@@ -729,13 +936,27 @@ void Trackball::process()
     }
     tlast = t0;
 
-    LOG_DBG("Stopped sphere tracking loop!");
+    LOG_DBG("Stopped sphere tracking loop after %u processed frame(s); last log frame=%u.", _data.cnt, _data.cnt > 0 ? _data.cnt - 1 : 0);
 
     _frameGrabber->terminate();     // make sure we've stopped grabbing frames as well
 
     if (_data.cnt > 1) {
         PRINT("\n----------------------------------------------------------------------------");
         LOG("Trackball timing:");
+        LOG(
+            "Frame path counts: source grabbed=%lld, framegrabber captured=%lld, framegrabber delivered=%lld, trackball processed=%u",
+            _frameGrabber ? _frameGrabber->getSourceGrabbedFrameCount() : 0,
+            _frameGrabber ? _frameGrabber->getCapturedFrameCount() : 0,
+            _frameGrabber ? _frameGrabber->getDeliveredFrameCount() : 0,
+            _data.cnt
+        );
+        LOG(
+            "Frame path timestamps: source first_ts=%.6f last_ts=%.6f first_ms_since_midnight=%.6f last_ms_since_midnight=%.6f",
+            _frameGrabber ? _frameGrabber->getSourceFirstGrabbedTimestamp() : -1,
+            _frameGrabber ? _frameGrabber->getSourceLastGrabbedTimestamp() : -1,
+            _frameGrabber ? _frameGrabber->getSourceFirstGrabbedMsSinceMidnight() : -1,
+            _frameGrabber ? _frameGrabber->getSourceLastGrabbedMsSinceMidnight() : -1
+        );
         LOG("Average grab/opt/map/plot/log/disp time: %.1f / %.1f / %.1f / %.1f / %.1f / %.1f ms",
             t1avg / (_data.cnt - 1), t2avg / (_data.cnt - 1), t3avg / (_data.cnt - 1), t4avg / (_data.cnt - 1), t5avg / (_data.cnt - 1), t6avg / (_data.cnt - 1));
         LOG("Average fps: %.2f", 1000. * (_data.cnt - 1) / (tlast - tfirst));
@@ -747,6 +968,7 @@ void Trackball::process()
     }
 
     _active = false;
+    _drawCond.notify_all();
 }
 
 ///
@@ -1240,7 +1462,7 @@ void Trackball::processDrawQ()
     }
     l.unlock();
 
-    LOG_DBG("Finished processing drawing queue.");
+    LOG("Finished processing drawing queue.");
 }
 
 ///
@@ -1447,13 +1669,10 @@ void Trackball::drawCanvas(shared_ptr<DrawData> data)
         _do_reset = true;
     }
 
-    if (_save_raw) {
-        _raw_vid.write(src_frame);
-    }
     if (_save_debug) {
         _debug_vid.write(canvas);
     }
-    if (_save_raw || _save_debug) {
+    if (_save_debug && _vid_frames) {
         _vid_frames->addMsg(to_string(log_frame) + "\n");
     }
 }
