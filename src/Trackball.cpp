@@ -812,8 +812,7 @@ void Trackball::reset()
 
     /// Drawing.
     if (_do_display) {
-        _R_roi_hist.clear();
-        _pos_heading_hist.clear();
+        _draw_history_reset_pending = true;
     }
 
     _do_reset = false;
@@ -887,13 +886,14 @@ void Trackball::process()
         if (_do_display) {
             auto data = make_shared<DrawData>();
             data->log_frame = _data.cnt;
-            data->src_frame = _src_frame.clone();
-            data->roi_frame = _roi_frame.clone();
+            data->src_frame = _src_frame;
+            data->roi_frame = _roi_frame;
             data->sphere_map = _sphere_map.clone();
             data->dr_roi = _data.dr_roi;
             data->R_roi = _data.R_roi.clone();
-            data->R_roi_hist = _R_roi_hist;
-            data->pos_heading_hist = _pos_heading_hist;
+            data->pos_heading = CmPoint(_data.posx, _data.posy, _data.heading);
+            data->reset_history = _draw_history_reset_pending;
+            _draw_history_reset_pending = false;
 
             updateCanvasAsync(data);
         }
@@ -1190,17 +1190,6 @@ void Trackball::updatePath()
         prev_heading = _data.heading;
     }
 
-    if (_do_display) {
-        // update pos hist (in ROI-space!)
-        _R_roi_hist.push_back(_data.R_roi.clone());
-        while (_R_roi_hist.size() > DRAW_SPHERE_HIST_LENGTH) {
-            _R_roi_hist.pop_front();
-        }
-        _pos_heading_hist.push_back(CmPoint(_data.posx, _data.posy, _data.heading));
-        while (_pos_heading_hist.size() > DRAW_FICTIVE_PATH_LENGTH) {
-            _pos_heading_hist.pop_front();
-        }
-    }
 }
 
 ///
@@ -1485,6 +1474,8 @@ void Trackball::renderSphereView(const Mat& roi_frame, const Mat& R_roi, Mat& sp
 void Trackball::drawCanvas(shared_ptr<DrawData> data)
 {
     static Mat canvas(3 * DRAW_CELL_DIM, 4 * DRAW_CELL_DIM, CV_8UC3);
+    static deque<Mat> R_roi_hist;
+    static deque<CmPoint64f> pos_heading_hist;
     canvas.setTo(Scalar::all(0));
 
     /// Unpack current data.
@@ -1493,9 +1484,21 @@ void Trackball::drawCanvas(shared_ptr<DrawData> data)
     CmPoint64f& dr_roi = data->dr_roi;
     Mat& R_roi = data->R_roi;
     Mat& sphere_map = data->sphere_map;
-    deque<Mat>& R_roi_hist = data->R_roi_hist;
-    deque<CmPoint64f>& pos_heading_hist = data->pos_heading_hist;
+    CmPoint64f& pos_heading = data->pos_heading;
     unsigned int log_frame = data->log_frame;
+
+    if (data->reset_history) {
+        R_roi_hist.clear();
+        pos_heading_hist.clear();
+    }
+    R_roi_hist.push_back(R_roi.clone());
+    while (R_roi_hist.size() > DRAW_SPHERE_HIST_LENGTH) {
+        R_roi_hist.pop_front();
+    }
+    pos_heading_hist.push_back(pos_heading);
+    while (pos_heading_hist.size() > DRAW_FICTIVE_PATH_LENGTH) {
+        pos_heading_hist.pop_front();
+    }
 
     static Mat sphere_view;
     renderSphereView(roi_frame, R_roi, sphere_view);

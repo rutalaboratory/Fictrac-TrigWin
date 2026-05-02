@@ -127,8 +127,8 @@ private:
         cv::Mat src_frame, roi_frame, sphere_map;
         CmPoint64f dr_roi;
         cv::Mat R_roi;
-        std::deque<cv::Mat> R_roi_hist;
-        std::deque<CmPoint64f> pos_heading_hist;
+        CmPoint64f pos_heading;
+        bool reset_history;
     };
 
     bool updateCanvasAsync(std::shared_ptr<DrawData> data);
@@ -141,8 +141,7 @@ private:
     std::condition_variable _drawCond;
 
     bool _do_display, _save_raw, _save_debug;
-    std::deque<cv::Mat> _R_roi_hist;
-    std::deque<CmPoint64f> _pos_heading_hist;
+    bool _draw_history_reset_pending;
     cv::VideoWriter _debug_vid, _raw_vid;
     std::unique_ptr<std::ofstream> _raw_chunk_stream, _raw_index_stream;
     std::string _raw_stream_base, _raw_manifest_fn, _raw_index_fn;
