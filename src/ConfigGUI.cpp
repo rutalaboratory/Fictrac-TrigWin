@@ -500,6 +500,8 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
 : _config_fn(config_fn), _cancelled(false)
 {
     int first_frame_timeout_ms = 0;
+    string configured_fps_control_mode = PGRSource::fpsControlModeName(PGRSource::FPSControlMode::AUTO);
+    PGRSource::FPSControlMode fps_control_mode = PGRSource::FPSControlMode::AUTO;
 
     /// Load and parse config file.
     if (_cfg.read(_config_fn) <= 0) {
@@ -512,6 +514,17 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
     }
     else {
         _cfg.add("src_first_frame_timeout_ms", first_frame_timeout_ms);
+    }
+
+    if (_cfg.getStr("src_fps_mode", configured_fps_control_mode)) {
+        if (!PGRSource::tryParseFPSControlMode(configured_fps_control_mode, fps_control_mode)) {
+            LOG_WRN("Unrecognized src_fps_mode (%s); defaulting to auto.", configured_fps_control_mode.c_str());
+            fps_control_mode = PGRSource::FPSControlMode::AUTO;
+            configured_fps_control_mode = PGRSource::fpsControlModeName(fps_control_mode);
+        }
+    }
+    else {
+        _cfg.add("src_fps_mode", configured_fps_control_mode);
     }
 
     /// Read source file name.
@@ -602,7 +615,15 @@ bool ConfigGui::openInputSource(const string& input_fn, int first_frame_timeout_
         size_t parsed_length = 0;
         int id = std::stoi(input_fn, &parsed_length);
         if (parsed_length == input_fn.size()) {
-            _source = std::make_shared<PGRSource>(id, static_cast<long int>(first_frame_timeout_ms));
+            PGRSource::FPSControlMode fps_control_mode = PGRSource::FPSControlMode::AUTO;
+            string configured_fps_control_mode = PGRSource::fpsControlModeName(fps_control_mode);
+            if (_cfg.getStr("src_fps_mode", configured_fps_control_mode)) {
+                if (!PGRSource::tryParseFPSControlMode(configured_fps_control_mode, fps_control_mode)) {
+                    LOG_WRN("Unrecognized src_fps_mode (%s); defaulting to auto.", configured_fps_control_mode.c_str());
+                    fps_control_mode = PGRSource::FPSControlMode::AUTO;
+                }
+            }
+            _source = std::make_shared<PGRSource>(id, static_cast<long int>(first_frame_timeout_ms), fps_control_mode);
         }
         else {
             _source = std::make_shared<CVSource>(input_fn);

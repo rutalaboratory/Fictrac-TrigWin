@@ -14,8 +14,8 @@
 #include "timing.h"
 #include "CameraRemap.h"
 #include "BasicRemapper.h"
-#include "misc.h"
 #include "CVSource.h"
+#include "misc.h"
 #if defined(PGR_USB2) || defined(PGR_USB3)
 #include "PGRSource.h"
 #elif defined(BASLER_USB3)
@@ -123,13 +123,25 @@ Trackball::Trackball(string cfg_fn, string src_override)
 #if defined(PGR_USB2) || defined(PGR_USB3)
         long int first_frame_timeout_ms = PGRSource::DEFAULT_FIRST_FRAME_TIMEOUT_MS;
         int configured_first_frame_timeout_ms = static_cast<int>(first_frame_timeout_ms);
+        PGRSource::FPSControlMode fps_control_mode = PGRSource::FPSControlMode::AUTO;
+        string configured_fps_control_mode = PGRSource::fpsControlModeName(fps_control_mode);
         if (_cfg.getInt("src_first_frame_timeout_ms", configured_first_frame_timeout_ms)) {
             first_frame_timeout_ms = static_cast<long int>(configured_first_frame_timeout_ms);
         }
         else {
             _cfg.add("src_first_frame_timeout_ms", configured_first_frame_timeout_ms);
         }
-        source = make_shared<PGRSource>(id, first_frame_timeout_ms);
+        if (_cfg.getStr("src_fps_mode", configured_fps_control_mode)) {
+            if (!PGRSource::tryParseFPSControlMode(configured_fps_control_mode, fps_control_mode)) {
+                LOG_WRN("Unrecognized src_fps_mode (%s); defaulting to auto.", configured_fps_control_mode.c_str());
+                fps_control_mode = PGRSource::FPSControlMode::AUTO;
+                configured_fps_control_mode = PGRSource::fpsControlModeName(fps_control_mode);
+            }
+        }
+        else {
+            _cfg.add("src_fps_mode", configured_fps_control_mode);
+        }
+        source = make_shared<PGRSource>(id, first_frame_timeout_ms, fps_control_mode);
 #elif defined(BASLER_USB3)
         source = make_shared<BaslerSource>(id);
 #endif // PGR/BASLER
