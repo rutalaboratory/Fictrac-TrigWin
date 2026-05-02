@@ -482,10 +482,6 @@ Trackball::Trackball(string cfg_fn, string src_override)
         LOG("Forcing do_display = true, becase save_debug == true.");
         _do_display = true;
     }
-    if (_do_display) {
-        _sphere_view.create(_map_h, _map_w, CV_8UC1);
-        _sphere_view.setTo(Scalar::all(128));
-    }
 
     // do video stuff
     if (_save_raw || _save_debug) {
@@ -828,8 +824,7 @@ void Trackball::reset()
 
     /// Drawing.
     if (_do_display) {
-        _R_roi_hist.clear();
-        _pos_heading_hist.clear();
+        _draw_history_reset_pending = true;
     }
 
     _do_reset = false;
@@ -903,14 +898,14 @@ void Trackball::process()
         if (_do_display) {
             auto data = make_shared<DrawData>();
             data->log_frame = _data.cnt;
-            data->src_frame = _src_frame.clone();
-            data->roi_frame = _roi_frame.clone();
+            data->src_frame = _src_frame;
+            data->roi_frame = _roi_frame;
             data->sphere_map = _sphere_map.clone();
-            data->sphere_view = _sphere_view.clone();
             data->dr_roi = _data.dr_roi;
             data->R_roi = _data.R_roi.clone();
-            data->R_roi_hist = _R_roi_hist;
-            data->pos_heading_hist = _pos_heading_hist;
+            data->pos_heading = CmPoint(_data.posx, _data.posy, _data.heading);
+            data->reset_history = _draw_history_reset_pending;
+            _draw_history_reset_pending = false;
 
             updateCanvasAsync(data);
         }
@@ -1050,10 +1045,6 @@ void Trackball::updateSphere()
 {
     double* m = reinterpret_cast<double*>(_data.R_roi.data); // absolute orientation (3d mat) in ROI frame
 
-    if (_do_display) {
-        _sphere_view.setTo(Scalar::all(128));
-    }
-
     double p2s[3];
     int cnt = 0, good = 0;
     int px = 0, py = 0;
@@ -1090,9 +1081,6 @@ void Trackball::updateSphere()
                 good++;
                 map = (proi[j] == 255) ? (map + 1) : (map - 1);
             }
-
-            // display
-            if (_do_display) { _sphere_view.at<uint8_t>(py, px) = proi[j]; }
         }
     }
     
@@ -1214,17 +1202,6 @@ void Trackball::updatePath()
         prev_heading = _data.heading;
     }
 
-    if (_do_display) {
-        // update pos hist (in ROI-space!)
-        _R_roi_hist.push_back(_data.R_roi.clone());
-        while (_R_roi_hist.size() > DRAW_SPHERE_HIST_LENGTH) {
-            _R_roi_hist.pop_front();
-        }
-        _pos_heading_hist.push_back(CmPoint(_data.posx, _data.posy, _data.heading));
-        while (_pos_heading_hist.size() > DRAW_FICTIVE_PATH_LENGTH) {
-            _pos_heading_hist.pop_front();
-        }
-    }
 }
 
 ///
@@ -1477,12 +1454,40 @@ void Trackball::processDrawQ()
     LOG("Finished processing drawing queue.");
 }
 
+void Trackball::renderSphereView(const Mat& roi_frame, const Mat& R_roi, Mat& sphere_view)
+{
+    sphere_view.create(_map_h, _map_w, CV_8UC1);
+    sphere_view.setTo(Scalar::all(128));
+
+    double* m = reinterpret_cast<double*>(R_roi.data);
+    double p2s[3];
+    int px = 0, py = 0;
+
+    for (int i = 0; i < _roi_h; i++) {
+        const uint8_t* pmask = _roi_mask.ptr(i);
+        const uint8_t* proi = roi_frame.ptr(i);
+        for (int j = 0; j < _roi_w; j++) {
+            if (pmask[j] < 255) { continue; }
+
+            double* v = &(*_p1s_lut)[(i * _roi_w + j) * 3];
+            p2s[0] = m[0] * v[0] + m[3] * v[1] + m[6] * v[2];
+            p2s[1] = m[1] * v[0] + m[4] * v[1] + m[7] * v[2];
+            p2s[2] = m[2] * v[0] + m[5] * v[1] + m[8] * v[2];
+
+            if (!_sphere_model->vectorToPixelIndex(p2s, px, py)) { continue; }
+            sphere_view.at<uint8_t>(py, px) = proi[j];
+        }
+    }
+}
+
 ///
 ///
 ///
 void Trackball::drawCanvas(shared_ptr<DrawData> data)
 {
     static Mat canvas(3 * DRAW_CELL_DIM, 4 * DRAW_CELL_DIM, CV_8UC3);
+    static deque<Mat> R_roi_hist;
+    static deque<CmPoint64f> pos_heading_hist;
     canvas.setTo(Scalar::all(0));
 
     /// Unpack current data.
@@ -1490,11 +1495,25 @@ void Trackball::drawCanvas(shared_ptr<DrawData> data)
     Mat& roi_frame = data->roi_frame;
     CmPoint64f& dr_roi = data->dr_roi;
     Mat& R_roi = data->R_roi;
-    Mat& sphere_view = data->sphere_view;
     Mat& sphere_map = data->sphere_map;
-    deque<Mat>& R_roi_hist = data->R_roi_hist;
-    deque<CmPoint64f>& pos_heading_hist = data->pos_heading_hist;
+    CmPoint64f& pos_heading = data->pos_heading;
     unsigned int log_frame = data->log_frame;
+
+    if (data->reset_history) {
+        R_roi_hist.clear();
+        pos_heading_hist.clear();
+    }
+    R_roi_hist.push_back(R_roi.clone());
+    while (R_roi_hist.size() > DRAW_SPHERE_HIST_LENGTH) {
+        R_roi_hist.pop_front();
+    }
+    pos_heading_hist.push_back(pos_heading);
+    while (pos_heading_hist.size() > DRAW_FICTIVE_PATH_LENGTH) {
+        pos_heading_hist.pop_front();
+    }
+
+    static Mat sphere_view;
+    renderSphereView(roi_frame, R_roi, sphere_view);
 
     /// Draw source image.
     double radPerPix = _sphere_rad * 3.0 / (2 * DRAW_CELL_DIM);

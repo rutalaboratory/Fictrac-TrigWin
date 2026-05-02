@@ -26,6 +26,7 @@ public:
     
     bool is_open();
     bool run();
+    bool wasCancelled() const { return _cancelled; }
     
     enum INPUT_MODE {
         CIRC_INIT,
@@ -80,6 +81,10 @@ public:
     };
 
 private:
+    bool openInputSource(const std::string& input_fn, int first_frame_timeout_ms);
+#if defined(PGR_USB2) || defined(PGR_USB3)
+    std::string chooseLiveCamera(const std::string& initial_input_fn);
+#endif // PGR_USB2/3
     bool setFrame(cv::Mat& frame);
 
     bool updateRt(const std::string& ref_str, cv::Mat& R, cv::Mat& t);
@@ -95,6 +100,7 @@ private:
     ConfigParser _cfg;
     int _w, _h;
     float _disp_scl;
+    bool _cancelled;
     CameraModelPtr _cam_model;
     INPUT_DATA _input_data;
 
