@@ -5,6 +5,7 @@
 ### Added
 
 - Windows-triggered FicTrac fork update package refreshed from the validated MultiBiOS vendor tree.
+- Native sample-video parity regression test for the bundled offline sample input.
 
 ### Changed
 

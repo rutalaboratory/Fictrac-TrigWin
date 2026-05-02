@@ -23,11 +23,42 @@ using namespace FlyCapture2;
 
 using cv::Mat;
 
-PGRSource::PGRSource(int index, long int first_frame_timeout_ms)
+bool PGRSource::tryParseFPSControlMode(const std::string& value, FPSControlMode& mode)
+{
+    if ((value == "auto") || (value == "AUTO") || (value == "Auto")) {
+        mode = FPSControlMode::AUTO;
+        return true;
+    }
+    if ((value == "device") || (value == "DEVICE") || (value == "Device") || (value == "camera_framerate")) {
+        mode = FPSControlMode::DEVICE;
+        return true;
+    }
+    if ((value == "hardware_triggered") || (value == "HARDWARE_TRIGGERED") || (value == "HardwareTriggered") || (value == "timing_hint")) {
+        mode = FPSControlMode::HARDWARE_TRIGGERED;
+        return true;
+    }
+    return false;
+}
+
+const char* PGRSource::fpsControlModeName(FPSControlMode mode)
+{
+    switch (mode) {
+    case FPSControlMode::DEVICE:
+        return "device";
+    case FPSControlMode::HARDWARE_TRIGGERED:
+        return "hardware_triggered";
+    case FPSControlMode::AUTO:
+    default:
+        return "auto";
+    }
+}
+
+PGRSource::PGRSource(int index, long int first_frame_timeout_ms, FPSControlMode fps_control_mode)
 {
     try {
 #if defined(PGR_USB3)
     _first_frame_timeout_ms = first_frame_timeout_ms;
+    _fps_control_mode = fps_control_mode;
 
         // Retrieve singleton reference to system object
         _system = System::GetInstance();
@@ -92,6 +123,8 @@ PGRSource::PGRSource(int index, long int first_frame_timeout_ms)
         _width = _cam->Width();
         _height = _cam->Height();
         _fps = getFPS();
+
+        LOG("PGR source fps control mode: %s", fpsControlModeName(_fps_control_mode));
 
         if (_first_frame_timeout_ms <= 0) {
             LOG("PGR first-frame wait configured to wait indefinitely for the first trigger");
@@ -239,6 +272,35 @@ bool PGRSource::setFPS(double fps)
     if (_open && (fps > 0)) {
 #if defined(PGR_USB3)
         try {
+            bool trigger_mode_on = false;
+
+            Spinnaker::GenApi::INodeMap& nodeMap = _cam->GetNodeMap();
+            Spinnaker::GenApi::CEnumerationPtr ptrTriggerMode = nodeMap.GetNode("TriggerMode");
+            if (IsAvailable(ptrTriggerMode) && IsReadable(ptrTriggerMode)) {
+                Spinnaker::GenApi::CEnumEntryPtr ptrTriggerModeCurrent = ptrTriggerMode->GetCurrentEntry();
+                if (IsAvailable(ptrTriggerModeCurrent) && IsReadable(ptrTriggerModeCurrent)) {
+                    trigger_mode_on = (ptrTriggerModeCurrent->GetSymbolic() == "On");
+                }
+            }
+
+            const bool use_hardware_triggered_mode =
+                (_fps_control_mode == FPSControlMode::HARDWARE_TRIGGERED)
+                || ((_fps_control_mode == FPSControlMode::AUTO) && trigger_mode_on);
+
+            if (use_hardware_triggered_mode) {
+                if (IsWritable(_cam->AcquisitionFrameRateEnable)) {
+                    _cam->AcquisitionFrameRateEnable.SetValue(false);
+                }
+                _fps = fps;
+                if ((_fps_control_mode == FPSControlMode::HARDWARE_TRIGGERED) && !trigger_mode_on) {
+                    LOG_WRN("Configured src_fps_mode=hardware_triggered but camera TriggerMode is not currently On; using source fps %.2f as a timing hint only.", _fps);
+                }
+                else {
+                    LOG("Using configured source fps %.2f for timing only and leaving device frame-rate control disabled.", _fps);
+                }
+                return true;
+            }
+
             _cam->AcquisitionFrameRateEnable.SetValue(true);
             _cam->AcquisitionFrameRate.SetValue(fps);
         }

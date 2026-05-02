@@ -85,6 +85,23 @@ Purpose:
 - write raw frame chunks and frame indices incrementally instead of relying on one final AVI flush during shutdown
 - keep saved-frame accounting aligned to FicTrac `log_frame`
 
+### 6. Toggleable source frame-rate control for hardware-triggered Spinnaker cameras
+
+Files:
+
+- `include/PGRSource.h`
+- `src/PGRSource.cpp`
+- `src/Trackball.cpp`
+- `src/ConfigGUI.cpp`
+- `doc/params.md`
+- `sample/config.txt`
+
+Purpose:
+
+- add native FicTrac config control over whether `src_fps` drives camera-side frame-rate control or is used only as a timing hint
+- preserve `auto` mode for backwards compatibility while allowing explicit `hardware_triggered` mode outside MultiBiOS
+- prevent externally configured triggered-camera setups from being forced back into device frame-rate mode when tracking starts
+
 ## Validated Behavior On This Rig
 
 The currently validated packaged binary is:

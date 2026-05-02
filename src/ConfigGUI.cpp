@@ -156,6 +156,8 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
 : _config_fn(config_fn)
 {
     int first_frame_timeout_ms = 0;
+    string configured_fps_control_mode = PGRSource::fpsControlModeName(PGRSource::FPSControlMode::AUTO);
+    PGRSource::FPSControlMode fps_control_mode = PGRSource::FPSControlMode::AUTO;
 
     /// Load and parse config file.
     if (_cfg.read(_config_fn) <= 0) {
@@ -168,6 +170,17 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
     }
     else {
         _cfg.add("src_first_frame_timeout_ms", first_frame_timeout_ms);
+    }
+
+    if (_cfg.getStr("src_fps_mode", configured_fps_control_mode)) {
+        if (!PGRSource::tryParseFPSControlMode(configured_fps_control_mode, fps_control_mode)) {
+            LOG_WRN("Unrecognized src_fps_mode (%s); defaulting to auto.", configured_fps_control_mode.c_str());
+            fps_control_mode = PGRSource::FPSControlMode::AUTO;
+            configured_fps_control_mode = PGRSource::fpsControlModeName(fps_control_mode);
+        }
+    }
+    else {
+        _cfg.add("src_fps_mode", configured_fps_control_mode);
     }
 
     /// Read source file name.
@@ -187,7 +200,7 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
         if (input_fn.size() > 2) { throw std::exception(); }
         // first try reading input as camera id
         int id = std::stoi(input_fn);
-        _source = std::make_shared<PGRSource>(id, static_cast<long int>(first_frame_timeout_ms));
+        _source = std::make_shared<PGRSource>(id, static_cast<long int>(first_frame_timeout_ms), fps_control_mode);
     }
     catch (...) {
         // then try loading as video file
