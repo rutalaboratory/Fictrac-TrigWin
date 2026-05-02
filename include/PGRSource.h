@@ -22,7 +22,17 @@
 class PGRSource : public FrameSource {
 public:
     static constexpr long int DEFAULT_FIRST_FRAME_TIMEOUT_MS = 30000;
-    PGRSource(int index=0, long int first_frame_timeout_ms=30000);
+
+    enum class FPSControlMode {
+        AUTO,
+        DEVICE,
+        HARDWARE_TRIGGERED
+    };
+
+    static bool tryParseFPSControlMode(const std::string& value, FPSControlMode& mode);
+    static const char* fpsControlModeName(FPSControlMode mode);
+
+    PGRSource(int index=0, long int first_frame_timeout_ms=30000, FPSControlMode fps_control_mode=FPSControlMode::AUTO);
 	virtual ~PGRSource();
 
     virtual double getFPS();
@@ -36,6 +46,7 @@ private:
     Spinnaker::CameraList _camList;
     Spinnaker::CameraPtr _cam;
     long int _first_frame_timeout_ms = DEFAULT_FIRST_FRAME_TIMEOUT_MS;
+    FPSControlMode _fps_control_mode = FPSControlMode::AUTO;
     bool _received_first_frame = false;
     bool _camera_deinitialized = false;
 #elif defined(PGR_USB2)
