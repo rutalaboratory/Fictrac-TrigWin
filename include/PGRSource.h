@@ -19,9 +19,13 @@
 
 #include <opencv2/opencv.hpp>
 
+#include <string>
+#include <vector>
+
 class PGRSource : public FrameSource {
 public:
     static constexpr long int DEFAULT_FIRST_FRAME_TIMEOUT_MS = 30000;
+    static std::vector<std::string> describeAvailableCameras();
     PGRSource(int index=0, long int first_frame_timeout_ms=30000);
 	virtual ~PGRSource();
 

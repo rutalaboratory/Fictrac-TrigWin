@@ -27,8 +27,10 @@
 #include <opencv2/videoio.hpp>
 
 #include <iostream> // getline, stoi
-#include <cstdio>   // getchar
+#include <cctype>
 #include <exception>
+#include <algorithm>
+#include <limits>
 
 using cv::Mat;
 using cv::Point2d;
@@ -52,6 +54,348 @@ cv::Scalar COLOURS[NCOLOURS] = {
     Scalar(0,   255, 255),
     Scalar(255, 0,   255)
 };
+
+static void pumpGuiEvents(int iterations = 3)
+{
+    for (int i = 0; i < iterations; ++i) {
+        cv::waitKey(1);
+    }
+}
+
+enum OverlayAnchor {
+    OVERLAY_TOP_LEFT,
+    OVERLAY_BOTTOM_LEFT,
+    OVERLAY_CENTER,
+};
+
+static bool& overlayHelpEnabled()
+{
+    static bool enabled = false;
+    return enabled;
+}
+
+static bool handleOverlayToggleKey(int key)
+{
+    key &= 0xff;
+    if ((key == 'h') || (key == 'H')) {
+        overlayHelpEnabled() = !overlayHelpEnabled();
+        return true;
+    }
+    return false;
+}
+
+static vector<string> wrapOverlayLines(const vector<string>& lines, int max_text_width, double text_scale, int text_thickness)
+{
+    vector<string> wrapped_lines;
+    int baseline = 0;
+
+    for (const auto& line : lines) {
+        if (line.empty()) {
+            wrapped_lines.push_back(string());
+            continue;
+        }
+
+        string current_line;
+        size_t start = 0;
+        while (start < line.size()) {
+            size_t end = line.find(' ', start);
+            string token = line.substr(start, (end == string::npos) ? string::npos : end - start);
+            string candidate = current_line.empty() ? token : current_line + " " + token;
+            cv::Size candidate_size = cv::getTextSize(candidate, cv::FONT_HERSHEY_SIMPLEX, text_scale, text_thickness, &baseline);
+
+            if (!current_line.empty() && (candidate_size.width > max_text_width)) {
+                wrapped_lines.push_back(current_line);
+                current_line = token;
+            }
+            else {
+                current_line = candidate;
+            }
+
+            if (end == string::npos) {
+                break;
+            }
+            start = end + 1;
+        }
+
+        if (!current_line.empty()) {
+            wrapped_lines.push_back(current_line);
+        }
+    }
+
+    return wrapped_lines;
+}
+
+static void drawOverlayPanel(Mat& frame, const string& title, const vector<string>& lines, OverlayAnchor anchor = OVERLAY_TOP_LEFT, double max_width_ratio = 0.34)
+{
+    const int outer_margin = 10;
+    const int inner_padding = 8;
+    const int line_gap = 4;
+    const double title_scale = 0.52;
+    const double body_scale = 0.42;
+    const int title_thickness = 1;
+    const int body_thickness = 1;
+    const int max_width = std::max(static_cast<int>(frame.cols * max_width_ratio), 160);
+    const int max_text_width = std::max(max_width - inner_padding * 2, 80);
+
+    int baseline = 0;
+    cv::Size title_size = cv::getTextSize(title, cv::FONT_HERSHEY_SIMPLEX, title_scale, title_thickness, &baseline);
+    int panel_width = title_size.width;
+    const vector<string> wrapped_lines = wrapOverlayLines(lines, max_text_width, body_scale, body_thickness);
+    vector<cv::Size> line_sizes;
+    line_sizes.reserve(wrapped_lines.size());
+    for (const auto& line : wrapped_lines) {
+        cv::Size line_size = cv::getTextSize(line, cv::FONT_HERSHEY_SIMPLEX, body_scale, body_thickness, &baseline);
+        line_sizes.push_back(line_size);
+        panel_width = std::max(panel_width, line_size.width);
+    }
+    panel_width = std::min(panel_width + inner_padding * 2, max_width);
+
+    int panel_height = inner_padding * 2 + title_size.height;
+    if (!wrapped_lines.empty()) {
+        panel_height += line_gap;
+        for (const auto& line_size : line_sizes) {
+            panel_height += std::max(line_size.height, 10) + line_gap;
+        }
+        panel_height -= line_gap;
+    }
+
+    panel_height = std::min(panel_height, std::max(frame.rows - outer_margin * 2, 60));
+
+    int panel_x = outer_margin;
+    int panel_y = outer_margin;
+    if (anchor == OVERLAY_BOTTOM_LEFT) {
+        panel_y = frame.rows - outer_margin - panel_height;
+    }
+    else if (anchor == OVERLAY_CENTER) {
+        panel_x = std::max((frame.cols - panel_width) / 2, outer_margin);
+        panel_y = std::max((frame.rows - panel_height) / 2, outer_margin);
+    }
+
+    cv::Rect panel_rect(panel_x, panel_y, panel_width, panel_height);
+    cv::Mat panel_roi = frame(panel_rect);
+    cv::Mat tint(panel_roi.size(), panel_roi.type(), cv::Scalar(24, 24, 24));
+    cv::addWeighted(tint, 0.62, panel_roi, 0.38, 0.0, panel_roi);
+    cv::rectangle(frame, panel_rect, Scalar(220, 220, 220), 1, cv::LINE_AA);
+
+    int text_x = panel_rect.x + inner_padding;
+    int text_y = panel_rect.y + inner_padding + title_size.height;
+    cv::putText(frame, title, cv::Point(text_x, text_y), cv::FONT_HERSHEY_SIMPLEX, title_scale, Scalar(255, 255, 255), title_thickness, cv::LINE_AA);
+
+    text_y += line_gap;
+    for (size_t index = 0; index < wrapped_lines.size(); ++index) {
+        text_y += std::max(line_sizes[index].height, 10) + line_gap;
+        if (!wrapped_lines[index].empty()) {
+            cv::putText(frame, wrapped_lines[index], cv::Point(text_x, text_y), cv::FONT_HERSHEY_SIMPLEX, body_scale, Scalar(230, 230, 230), body_thickness, cv::LINE_AA);
+        }
+    }
+}
+
+static void drawFooterPanel(Mat& frame, const vector<string>& lines)
+{
+    if (lines.empty()) {
+        return;
+    }
+
+    const int outer_margin = 8;
+    const int inner_padding = 6;
+    const int line_gap = 2;
+    const double body_scale = 0.36;
+    const int body_thickness = 1;
+    const int max_width = std::max(static_cast<int>(frame.cols * 0.70), 180);
+    const int max_text_width = std::max(max_width - inner_padding * 2, 80);
+    const vector<string> wrapped_lines = wrapOverlayLines(lines, max_text_width, body_scale, body_thickness);
+
+    int baseline = 0;
+    int panel_width = 0;
+    int panel_height = inner_padding * 2;
+    vector<cv::Size> line_sizes;
+    line_sizes.reserve(wrapped_lines.size());
+    for (const auto& line : wrapped_lines) {
+        cv::Size line_size = cv::getTextSize(line, cv::FONT_HERSHEY_SIMPLEX, body_scale, body_thickness, &baseline);
+        line_sizes.push_back(line_size);
+        panel_width = std::max(panel_width, line_size.width);
+        panel_height += std::max(line_size.height, 9) + line_gap;
+    }
+    panel_width = std::min(panel_width + inner_padding * 2, max_width);
+    panel_height -= line_gap;
+
+    const int panel_x = outer_margin;
+    const int panel_y = frame.rows - outer_margin - panel_height;
+    cv::Rect panel_rect(panel_x, panel_y, panel_width, panel_height);
+    cv::Mat panel_roi = frame(panel_rect);
+    cv::Mat tint(panel_roi.size(), panel_roi.type(), cv::Scalar(18, 18, 18));
+    cv::addWeighted(tint, 0.52, panel_roi, 0.48, 0.0, panel_roi);
+    cv::rectangle(frame, panel_rect, Scalar(200, 200, 200), 1, cv::LINE_AA);
+
+    int text_x = panel_rect.x + inner_padding;
+    int text_y = panel_rect.y + inner_padding;
+    for (size_t index = 0; index < wrapped_lines.size(); ++index) {
+        text_y += std::max(line_sizes[index].height, 9);
+        if (!wrapped_lines[index].empty()) {
+            cv::putText(frame, wrapped_lines[index], cv::Point(text_x, text_y), cv::FONT_HERSHEY_SIMPLEX, body_scale, Scalar(245, 245, 245), body_thickness, cv::LINE_AA);
+        }
+        text_y += line_gap;
+    }
+}
+
+static void showConfigGuiFrame(const Mat& disp_frame, float disp_scl, const vector<string>& footer_lines, const string& help_title = string(), const vector<string>& help_lines = {}, OverlayAnchor help_anchor = OVERLAY_TOP_LEFT, double help_width_ratio = 0.34)
+{
+    Mat frame_to_show = disp_frame.clone();
+    drawFooterPanel(frame_to_show, footer_lines);
+    if (overlayHelpEnabled() && !help_title.empty()) {
+        drawOverlayPanel(frame_to_show, help_title, help_lines, help_anchor, help_width_ratio);
+    }
+    if (disp_scl > 0) {
+        cv::resize(frame_to_show, frame_to_show, cv::Size(), disp_scl, disp_scl);
+    }
+    cv::imshow("configGUI", frame_to_show);
+}
+
+enum PromptChoice {
+    PROMPT_KEEP,
+    PROMPT_RECONFIGURE,
+    PROMPT_CANCEL,
+};
+
+static PromptChoice waitForPromptChoice(const Mat& disp_frame, float disp_scl, const string& title, const vector<string>& lines)
+{
+    const vector<string> footer_lines = {
+        title,
+        "Enter/Y keep  N redraw  H help  Esc cancel"
+    };
+
+    while (true) {
+        showConfigGuiFrame(disp_frame, disp_scl, footer_lines, title, lines, OVERLAY_TOP_LEFT, 0.28);
+        int key = cv::waitKeyEx(15);
+        if (key < 0) {
+            continue;
+        }
+
+        if (handleOverlayToggleKey(key)) {
+            continue;
+        }
+
+        key &= 0xff;
+        switch (std::tolower(key)) {
+        case 'y':
+            return PROMPT_KEEP;
+        case 'n':
+            return PROMPT_RECONFIGURE;
+        case 0x0d:
+        case 0x0a:
+            return PROMPT_KEEP;
+        case 0x1b:
+            return PROMPT_CANCEL;
+        default:
+            break;
+        }
+    }
+}
+
+static int waitForMethodSelection(const Mat& disp_frame, float disp_scl)
+{
+    const vector<string> lines = {
+        "Choose the animal-frame method.",
+        "1: XY square, camera above or below the animal",
+        "2: YZ square, camera in front of or behind the animal",
+        "3: XZ square, camera to the left or right of the animal",
+        "5: External transform",
+        "Esc: cancel"
+    };
+
+    while (true) {
+        showConfigGuiFrame(disp_frame, disp_scl, {
+            "Animal Frame",
+            "1 XY  2 YZ  3 XZ  5 external  Esc cancel"
+        }, "Animal Frame", lines, OVERLAY_TOP_LEFT, 0.30);
+        int key = cv::waitKeyEx(15);
+        if (key < 0) {
+            continue;
+        }
+
+        if (handleOverlayToggleKey(key)) {
+            continue;
+        }
+
+        key &= 0xff;
+        switch (key) {
+        case '1':
+        case '2':
+        case '3':
+        case '5':
+            return key - '0';
+        case 0x1b:
+            return 0;
+        default:
+            break;
+        }
+    }
+}
+
+static Mat makeSelectionBackground(int width = 960, int height = 540)
+{
+    Mat background(height, width, CV_8UC3, Scalar(20, 20, 20));
+    for (int y = 0; y < background.rows; ++y) {
+        double blend = static_cast<double>(y) / std::max(background.rows - 1, 1);
+        cv::line(background, cv::Point(0, y), cv::Point(background.cols - 1, y), Scalar(18 + 14 * blend, 24 + 18 * blend, 28 + 22 * blend), 1, cv::LINE_8);
+    }
+    return background;
+}
+
+static int waitForListSelection(const string& title, const vector<string>& options, int initial_index, const vector<string>& instructions)
+{
+    if (options.empty()) {
+        return -1;
+    }
+
+    int selected_index = clamp(initial_index, 0, static_cast<int>(options.size()) - 1);
+    Mat background = makeSelectionBackground();
+
+    while (true) {
+        vector<string> lines = instructions;
+        lines.push_back("");
+        for (size_t index = 0; index < options.size(); ++index) {
+            const string prefix = (static_cast<int>(index) == selected_index) ? "> " : "  ";
+            lines.push_back(prefix + std::to_string(index) + ": " + options[index]);
+        }
+        lines.push_back("");
+        lines.push_back("Up or Down: move    Enter: select    Esc: cancel");
+        if (options.size() <= 10) {
+            lines.push_back("Number keys 0-9: jump directly to a camera");
+        }
+
+        drawOverlayPanel(background, title, lines, OVERLAY_CENTER, 0.60);
+        cv::imshow("configGUI", background);
+        int key = cv::waitKeyEx(15);
+        if (key < 0) {
+            continue;
+        }
+
+        if ((key == 0x0d) || (key == 0x0a)) {
+            cv::destroyWindow("configGUI");
+            return selected_index;
+        }
+        if (key == 0x1b) {
+            cv::destroyWindow("configGUI");
+            return -1;
+        }
+        if ((key == 2490368) || (key == 0x26) || (key == 'w') || (key == 'W')) {
+            selected_index = (selected_index + static_cast<int>(options.size()) - 1) % static_cast<int>(options.size());
+            continue;
+        }
+        if ((key == 2621440) || (key == 0x28) || (key == 's') || (key == 'S')) {
+            selected_index = (selected_index + 1) % static_cast<int>(options.size());
+            continue;
+        }
+        key &= 0xff;
+        if ((key >= '0') && (key <= '9')) {
+            const int direct_index = key - '0';
+            if (direct_index < static_cast<int>(options.size())) {
+                selected_index = direct_index;
+            }
+        }
+    }
+}
 
 ///
 /// Collect mouse events from config GUI window.
@@ -153,7 +497,7 @@ void createZoomROI(Mat& zoom_roi, const Mat& frame, const Point2d& pt, int orig_
 /// Constructor.
 ///
 ConfigGui::ConfigGui(string config_fn, string src_override)
-: _config_fn(config_fn)
+: _config_fn(config_fn), _cancelled(false)
 {
     int first_frame_timeout_ms = 0;
 
@@ -181,22 +525,27 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
         return;
     }
 
-    /// Open the image source.
 #if defined(PGR_USB2) || defined(PGR_USB3)
-    try {
-        if (input_fn.size() > 2) { throw std::exception(); }
-        // first try reading input as camera id
-        int id = std::stoi(input_fn);
-        _source = std::make_shared<PGRSource>(id, static_cast<long int>(first_frame_timeout_ms));
+    if (src_override.empty()) {
+        try {
+            size_t parsed_length = 0;
+            std::stoi(input_fn, &parsed_length);
+            if (parsed_length == input_fn.size()) {
+                input_fn = chooseLiveCamera(input_fn);
+                if (input_fn.empty()) {
+                    _cancelled = true;
+                    LOG_WRN("No live camera selected. Cancelling configuration.");
+                    return;
+                }
+            }
+        }
+        catch (...) {
+        }
     }
-    catch (...) {
-        // then try loading as video file
-        _source = std::make_shared<CVSource>(input_fn);
-    }
-#else // !PGR_USB2/3
-    _source = std::make_shared<CVSource>(input_fn);
 #endif // PGR_USB2/3
-    if (!_source || !_source->isOpen()) {
+
+    /// Open the image source.
+    if (!openInputSource(input_fn, first_frame_timeout_ms)) {
         LOG_ERR("Error! Could not open input frame source (%s)!", input_fn.c_str());
         return;
     }
@@ -245,6 +594,57 @@ ConfigGui::ConfigGui(string config_fn, string src_override)
 ///
 ConfigGui::~ConfigGui()
 {}
+
+bool ConfigGui::openInputSource(const string& input_fn, int first_frame_timeout_ms)
+{
+#if defined(PGR_USB2) || defined(PGR_USB3)
+    try {
+        size_t parsed_length = 0;
+        int id = std::stoi(input_fn, &parsed_length);
+        if (parsed_length == input_fn.size()) {
+            _source = std::make_shared<PGRSource>(id, static_cast<long int>(first_frame_timeout_ms));
+        }
+        else {
+            _source = std::make_shared<CVSource>(input_fn);
+        }
+    }
+    catch (...) {
+        _source = std::make_shared<CVSource>(input_fn);
+    }
+#else // !PGR_USB2/3
+    _source = std::make_shared<CVSource>(input_fn);
+#endif // PGR_USB2/3
+    return _source && _source->isOpen();
+}
+
+#if defined(PGR_USB2) || defined(PGR_USB3)
+string ConfigGui::chooseLiveCamera(const string& initial_input_fn)
+{
+    vector<string> cameras = PGRSource::describeAvailableCameras();
+    if (cameras.empty()) {
+        LOG_ERR("Error! Could not find any connected PGR cameras!");
+        return string();
+    }
+
+    int initial_index = 0;
+    try {
+        initial_index = std::stoi(initial_input_fn);
+    }
+    catch (...) {
+        initial_index = 0;
+    }
+
+    const int selected_index = waitForListSelection("Choose Live Camera", cameras, initial_index, {
+        "Select the camera to use for FicTrac configuration.",
+        "This picker replaces the terminal camera prompt.",
+        "The selected camera is used for this config session."
+    });
+    if (selected_index < 0) {
+        return string();
+    }
+    return std::to_string(selected_index);
+}
+#endif // PGR_USB2/3
 
 ///
 /// Write camera-animal transform to config file.
@@ -478,6 +878,8 @@ bool ConfigGui::run()
     Mat disp_frame, zoom_frame(ZOOM_DIM, ZOOM_DIM, CV_8UC3);
     const int scaled_zoom_dim = static_cast<int>(ZOOM_DIM * ZOOM_SCL + 0.5);
     bool open = true;
+    bool had_error = false;
+    bool user_cancelled = false;
     while (open && (key != 0x1b)) {    // esc
         /// Create frame for drawing.
         //cv::cvtColor(_frame, disp_frame, CV_GRAY2RGB);
@@ -490,8 +892,6 @@ bool ConfigGui::run()
             disp_frame = (disp_frame - min) * 255 / (max - min);
         }
         
-        int in;
-        string str;
         switch (_input_data.mode)
         {
             /// Check for existing circumference points.
@@ -530,6 +930,7 @@ bool ConfigGui::run()
                             _cfg.add("roi_r", r);
                             if (_cfg.write() <= 0) {
                                 LOG_ERR("Error writing to config file (%s)!", _config_fn.c_str());
+                                had_error = true;
                                 open = false;  // will cause exit
                             }
                         }
@@ -545,45 +946,26 @@ bool ConfigGui::run()
                     drawCircle_camModel(disp_frame, _cam_model, c, r, Scalar(255,0,0), false);
         
                     /// Display.
-                    if (_disp_scl > 0) {
-                        cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
-                    }
-                    cv::imshow("configGUI", disp_frame);
-                    cv::waitKey(100);   //FIXME: why do we have to wait so long to make sure the frame is drawn?
-                            
-                    printf("\n\n\n  Sphere ROI configuration was found in the config file.\n  You can keep it, or discard it and reconfigure.\n");
-                            
-                    // input loop
-                    while (true) {
-                        cv::waitKey(100);   //FIXME: dirty hack - sometimes image doesn't draw, at least with this line we can just mash keys until it does
-                        printf("\n  Would you like to keep the existing sphere ROI configuration ([y]/n)? ");
-                        in = getchar();
-                        switch (in)
-                        {
-                            case 'y':
-                            case 'Y':
-                                getchar(); // discard \n
-                            case '\n':
-                                // advance state
-								changeState(IGNR_INIT);
-                                break;
-                            case 'n':
-                            case 'N':
-                                getchar(); // discard \n
-                                break;
-                            default:
-                                LOG_WRN("Invalid input!");
-                                getchar(); // discard \n
-                                continue;
-                                break;
-                        }
-                        break;
+                    switch (waitForPromptChoice(disp_frame, _disp_scl, "Existing Sphere ROI", {
+                        "A sphere ROI was found in the config file.",
+                        "Keep it to reuse the saved fit, or reconfigure it from new clicks."
+                    }))
+                    {
+                        case PROMPT_KEEP:
+							changeState(IGNR_INIT);
+                            break;
+                        case PROMPT_RECONFIGURE:
+                            break;
+                        case PROMPT_CANCEL:
+                            user_cancelled = true;
+                            open = false;
+                            key = 0x1b;
+                            break;
                     }
                 }
                 
                 if (_input_data.mode == CIRC_INIT) {
                     _input_data.circPts.clear();
-                    printf("\n\n\n  Define the circumference of the track ball.\n\n  Use the left mouse button to add new points.\n  You must select at least 3 (but preferably 6+) points around the circumference of the track ball.\n  NOTE! Be careful to place points only on the circumference of the track ball,\nand not along the outline of the visible track ball where the actual circumference has been partially obscured.\n  You can use the right mouse button to remove the last added point.\n  The fitted circumference is drawn in red.\n\n  Press ENTER when you are satisfied with the fitted circumference, or press ESC to exit..\n\n");
 					changeState(CIRC_PTS);
                 }
                 break;
@@ -617,11 +999,19 @@ bool ConfigGui::run()
                 
                 /// Display.
                 cv::imshow("zoomROI", zoom_frame);
-                if (_disp_scl > 0) {
-                    cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
+                showConfigGuiFrame(disp_frame, _disp_scl, {
+                    string("Sphere ROI  points ") + std::to_string(_input_data.circPts.size()),
+                    "L add  R undo  Enter accept  H help  Esc cancel"
+                }, "Sphere ROI", {
+                    "Left click adds a circumference point.",
+                    "Right click removes the most recent point.",
+                    "Pick at least 3 points. Six or more usually fits better.",
+                    "Avoid the visible rim where the true ball edge is occluded."
+                }, OVERLAY_TOP_LEFT, 0.28);
+                key = cv::waitKeyEx(5);
+                if (handleOverlayToggleKey(key)) {
+                    break;
                 }
-                cv::imshow("configGUI", disp_frame);
-                key = cv::waitKey(5);
                 
                 /// State machine logic.
                 if ((key == 0x0d) || (key == 0x0a)) {   // return
@@ -645,6 +1035,7 @@ bool ConfigGui::run()
                         _cfg.add("roi_r", r);
                         if (_cfg.write() <= 0) {
                             LOG_ERR("Error writing to config file (%s)!", _config_fn.c_str());
+                            had_error = true;
                             open = false;  // will cause exit
                         }
                         
@@ -690,45 +1081,26 @@ bool ConfigGui::run()
                     }
                     
                     /// Display.
-                    if (_disp_scl > 0) {
-                        cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
-                    }
-                    cv::imshow("configGUI", disp_frame);
-                    cv::waitKey(100);   //FIXME: why do we have to wait so long to make sure the frame is drawn?
-                    
-                    printf("\n\n\n  Ignore region points were found in the config file.\n  You can discard these points and re-run config or keep the existing points.\n");
-                    
-                    // input loop
-                    while (true) {
-                        cv::waitKey(100);   //FIXME: dirty hack - sometimes image doesn't draw, at least with this line we can just mash keys until it does
-                        printf("\n  Would you like to keep the existing ignore regions ([y]/n)? ");
-                        in = getchar();
-                        switch (in)
-                        {
-                            case 'y':
-                            case 'Y':
-                                getchar(); // discard \n
-                            case '\n':
-                                // advance state
-								changeState(R_INIT);
-                                break;
-                            case 'n':
-                            case 'N':
-                                getchar(); // discard \n
-                                break;
-                            default:
-                                LOG_WRN("Invalid input!");
-                                getchar(); // discard \n
-                                continue;
-                                break;
-                        }
-                        break;
+                    switch (waitForPromptChoice(disp_frame, _disp_scl, "Existing Ignore Regions", {
+                        "Ignore regions were found in the config file.",
+                        "Keep them to reuse the saved polygons, or redraw them now."
+                    }))
+                    {
+                        case PROMPT_KEEP:
+							changeState(R_INIT);
+                            break;
+                        case PROMPT_RECONFIGURE:
+                            break;
+                        case PROMPT_CANCEL:
+                            user_cancelled = true;
+                            open = false;
+                            key = 0x1b;
+                            break;
                     }
                 }
                 
                 if (_input_data.mode == IGNR_INIT) {
                     _input_data.ignrPts.clear();
-                    printf("\n\n\n  Define ignore regions.\n\n  Use the left mouse button to add points to a new polygon.\n  Polygons can be drawn around objects (such as the animal) that block the view of the track ball.\n  You can use the right mouse button to remove the last added point.\n\n  Press ENTER to start a new polygon, or press ENTER twice when you are satisfied with the selected ignore regions, or press ESC to exit..\n\n");
 					changeState(IGNR_PTS);
                 }
                 break;
@@ -756,11 +1128,19 @@ bool ConfigGui::run()
                 
                 /// Display.
                 cv::imshow("zoomROI", zoom_frame);
-                if (_disp_scl > 0) {
-                    cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
+                showConfigGuiFrame(disp_frame, _disp_scl, {
+                    string("Ignore Regions  polys ") + std::to_string(_input_data.ignrPts.size()),
+                    "L add  R undo  Enter next/finish  H help  Esc cancel"
+                }, "Ignore Regions", {
+                    "Left click adds points to the active polygon.",
+                    "Right click removes the most recent point.",
+                    "Press Enter to start a new polygon.",
+                    "Press Enter on an empty polygon to finish ignore regions."
+                }, OVERLAY_TOP_LEFT, 0.28);
+                key = cv::waitKeyEx(5);
+                if (handleOverlayToggleKey(key)) {
+                    break;
                 }
-                cv::imshow("configGUI", disp_frame);
-                key = cv::waitKey(5);
                 
                 /// State machine logic.
                 if ((key == 0x0d) || (key == 0x0a)) {  // return
@@ -783,6 +1163,7 @@ bool ConfigGui::run()
                         _cfg.add("roi_ignr", cfg_polys);
                         if (_cfg.write() <= 0) {
                             LOG_ERR("Error writing to config file (%s)!", _config_fn.c_str());
+                            had_error = true;
                             open = false;      // will cause exit
                         }
                         
@@ -873,40 +1254,22 @@ bool ConfigGui::run()
                 drawC2AAxes(disp_frame, R, t, r, c);
 
 				/// Display.
-                if (_disp_scl > 0) {
-                    cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
+                switch (waitForPromptChoice(disp_frame, _disp_scl, "Existing Camera-Animal Transform", {
+                    "A saved camera-animal transform was found in the config file.",
+                    "Keep it to reuse the current calibration, or reconfigure it now."
+                }))
+                {
+                    case PROMPT_KEEP:
+                        changeState(EXIT);
+                        break;
+                    case PROMPT_RECONFIGURE:
+                        break;
+                    case PROMPT_CANCEL:
+                        user_cancelled = true;
+                        open = false;
+                        key = 0x1b;
+                        break;
                 }
-				cv::imshow("configGUI", disp_frame);
-				cv::waitKey(100);   //FIXME: why do we have to wait so long to make sure the frame is drawn?
-
-				printf("\n\n\n  A camera-animal transform was found in the config file.\n  You can keep the existing transform, or discard and re-run config.\n");
-
-				// input loop
-				while (true) {
-					cv::waitKey(100);   //FIXME: dirty hack - sometimes image doesn't draw, at least with this line we can just mash keys until it does
-					printf("\n  Would you like to keep the existing transform ([y]/n)? ");
-					in = getchar();
-					switch (in)
-					{
-						case 'y':
-						case 'Y':
-							getchar(); // discard \n
-						case '\n':
-							// advance state
-							changeState(EXIT);
-							break;
-						case 'n':
-						case 'N':
-							getchar(); // discard \n
-							break;
-						default:
-							LOG_WRN("Invalid input!");
-							getchar(); // discard \n
-							continue;
-							break;
-					}
-					break;
-				}
 
 				if (_input_data.mode == R_INIT) {
 					changeState(R_SLCT);
@@ -915,71 +1278,29 @@ bool ConfigGui::run()
             
             /// Choose method for defining animal frame.
             case R_SLCT:
-                printf("\n\n\n  Define the animal's coordinate frame.\n\n  You must now define the reference frame of the animal, from the perspective of the camera.\n  This allows FicTrac to convert rotations of the ball into walking and turning motions for the animal.\n");
-                printf("  The camera's reference frame is defined as: X = image right (cols); Y = image down (rows); Z = into image (out from camera)\n");
-                printf("  The animal's reference frame is defined as: X = forward; Y = right; Z = down\n");
-                
-                printf("\n  There are 5 possible methods for defining the animal's coordinate frame:\n");
-                printf("\n\t 1 (XY square) : [Default] Click the four corners of a square shape that is aligned with the animal's X-Y axes. This method is recommended when the camera is above/below the animal.\n");
-                printf("\n\t 2 (YZ square) : Click the four corners of a square shape that is aligned with the animal's Y-Z axes. This method is recommended when the camera is in front/behind the animal.\n");
-                printf("\n\t 3 (XZ square) : Click the four corners of a square shape that is aligned with the animal's X-Z axes. This method is recommended when the camera is to the animal's left/right.\n");
-                // printf("\n\t 4 (manual)    : Rotate a visualisation of the animal's coordinate frame to align with the orientation of the animal. This method is not recommended as it is inaccurate.\n");
-                printf("\n\t 5 (external)  : The transform between the camera and animal reference frames can also be defined by hand by editing the appropriate variables in the config file. This method is only recommended when the transform is known by some other means.\n");
-                
-                // input loop
-                while (true) {
-                    printf("\n\n  Please enter your preferred method [1]: ");
-                    std::getline(std::cin, str);
-                    if (str.empty()) {
-                        in = 1;
-                    } else {
-                        try { in = std::stoi(str); }
-                        catch(...) {
-                            LOG_WRN("Invalid input!");
-                            continue;
-                        }
-                    }
-                    switch (in)
-                    {
-                        case 1:
-                            printf("\n\n\n  XY-square method.\n\n  Please click on the four corners of a square shape that is aligned with the animal's X-Y axes. The corners must be clicked in the following order: (+X,-Y), (+X,+Y), (-X,+Y), (-X,-Y). If your camera is looking down on the animal from above, then the four corners are (in order): TL, TR, BR, BL from the camera's perspective. If your camera is below the animal, then the order is TR, TL, BL, BR.\n\n  Make sure the displayed axis is the correct right-handed coordinate frame!!\n\n  You can hold F to mirror the axis if the handedness is incorrect.\n\n  Press ENTER when you are satisfied with the animal's axis, or press ESC to exit..\n\n");
-                            c2a_src = "c2a_cnrs_xy";
-                            // advance state
-							changeState(R_XY);
-                            break;
-                            
-                        case 2:
-                            printf("\n\n\n  YZ-square method.\n\n  Please click on the four corners of a square shape that is aligned with the animal's Y-Z axes. The corners must be clicked in the following order: (-Y,-Z), (+Y,-Z), (+Y,+Z), (-Y,+Z). If your camera is behind the animal, then the four corners are (in order): TL, TR, BR, BL from the camera's perspective. If your camera is in front of the animal, then the order is TR, TL, BL, BR.\n\n  Make sure the displayed axis is the correct right-handed coordinate frame!!\n\n  You can hold F to mirror the axis if the handedness is incorrect.\n\n  Press ENTER when you are satisfied with the animal's axis, or press ESC to exit..\n\n");
-                            c2a_src = "c2a_cnrs_yz";
-                            // advance state
-							changeState(R_YZ);
-                            break;
-                            
-                        case 3:
-                            printf("\n\n\n  XZ-square method.\n\n  Please click on the four corners of a square shape that is aligned with the animal's X-Z axes. The corners must be clicked in the following order: (+X,-Z), (-X,-Z), (-X,+Z), (+X,+Z). If your camera is to the animal's left side, then the four corners are (in order): TL, TR, BR, BL from the camera's perspective. If your camera is to the animal's right side, then the order is TR, TL, BL, BR.\n\n  Make sure the displayed axis is the correct right-handed coordinate frame!!\n\n  You can hold F to mirror the axis if the handedness is incorrect.\n\n  Press ENTER when you are satisfied with the animal's axis, or press ESC to exit..\n\n");
-                            c2a_src = "c2a_cnrs_xz";
-                            // advance state
-							changeState(R_XZ);
-                            break;
-                            
-                        // case 4:
-                            // // advance state
-                            // BOOST_LOG_TRIVIAL(debug) << "New state: R_MAN";
-                            // _input_data.mode = R_MAN;
-                            // break;
-                            
-                        case 5:
-                            c2a_src = "ext";
-                            // advance state
-							changeState(R_EXT);
-                            break;
-                            
-                        default:
-                            LOG_WRN("Invalid input!");
-                            continue;
-                            break;
-                    }
-                    break;
+                switch (waitForMethodSelection(disp_frame, _disp_scl))
+                {
+                    case 1:
+                        c2a_src = "c2a_cnrs_xy";
+						changeState(R_XY);
+                        break;
+                    case 2:
+                        c2a_src = "c2a_cnrs_yz";
+						changeState(R_YZ);
+                        break;
+                    case 3:
+                        c2a_src = "c2a_cnrs_xz";
+						changeState(R_XZ);
+                        break;
+                    case 5:
+                        c2a_src = "ext";
+						changeState(R_EXT);
+                        break;
+                    default:
+                        user_cancelled = true;
+                        open = false;
+                        key = 0x1b;
+                        break;
                 }
                 break;
             
@@ -1009,11 +1330,18 @@ bool ConfigGui::run()
                 
                 /// Display.
                 cv::imshow("zoomROI", zoom_frame);
-                if (_disp_scl > 0) {
-                    cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
+                showConfigGuiFrame(disp_frame, _disp_scl, {
+                    string("Animal Frame XY  corners ") + std::to_string(_input_data.sqrPts.size()),
+                    "L add  R undo  F mirror  Enter accept  H help"
+                }, "Animal Frame: XY", {
+                    "Click corners in order: (+X,-Y), (+X,+Y), (-X,+Y), (-X,-Y).",
+                    "If the camera is above the animal: TL, TR, BR, BL.",
+                    "If the camera is below the animal: TR, TL, BL, BR."
+                }, OVERLAY_TOP_LEFT, 0.30);
+                key = cv::waitKeyEx(5);
+                if (handleOverlayToggleKey(key)) {
+                    break;
                 }
-                cv::imshow("configGUI", disp_frame);
-                key = cv::waitKey(5);
                 
                 /// State machine logic.
                 if ((key == 0x0d) || (key == 0x0a)) {   // return
@@ -1021,6 +1349,7 @@ bool ConfigGui::run()
                         // dump corner points to config file
 						if (!saveC2ATransform(c2a_src, R, t)) {
 							LOG_ERR("Error writing coordinate transform to config file!");
+                                had_error = true;
                             open = false;      // will cause exit
 						}
                         
@@ -1065,11 +1394,18 @@ bool ConfigGui::run()
                 
                 /// Display.
                 cv::imshow("zoomROI", zoom_frame);
-                if (_disp_scl > 0) {
-                    cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
+                showConfigGuiFrame(disp_frame, _disp_scl, {
+                    string("Animal Frame YZ  corners ") + std::to_string(_input_data.sqrPts.size()),
+                    "L add  R undo  F mirror  Enter accept  H help"
+                }, "Animal Frame: YZ", {
+                    "Click corners in order: (-Y,-Z), (+Y,-Z), (+Y,+Z), (-Y,+Z).",
+                    "If the camera is behind the animal: TL, TR, BR, BL.",
+                    "If the camera is in front of the animal: TR, TL, BL, BR."
+                }, OVERLAY_TOP_LEFT, 0.30);
+                key = cv::waitKeyEx(5);
+                if (handleOverlayToggleKey(key)) {
+                    break;
                 }
-                cv::imshow("configGUI", disp_frame);
-                key = cv::waitKey(5);
                 
                 /// State machine logic.
                 if ((key == 0x0d) || (key == 0x0a)) {   // return
@@ -1077,6 +1413,7 @@ bool ConfigGui::run()
                         // dump corner points to config file
 						if (!saveC2ATransform(c2a_src, R, t)) {
 							LOG_ERR("Error writing coordinate transform to config file!");
+                                had_error = true;
                             open = false;      // will cause exit
 						}
                         
@@ -1121,11 +1458,18 @@ bool ConfigGui::run()
                 
                 /// Display.
                 cv::imshow("zoomROI", zoom_frame);
-                if (_disp_scl > 0) {
-                    cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
+                showConfigGuiFrame(disp_frame, _disp_scl, {
+                    string("Animal Frame XZ  corners ") + std::to_string(_input_data.sqrPts.size()),
+                    "L add  R undo  F mirror  Enter accept  H help"
+                }, "Animal Frame: XZ", {
+                    "Click corners in order: (+X,-Z), (-X,-Z), (-X,+Z), (+X,+Z).",
+                    "If the camera is to the animal's left: TL, TR, BR, BL.",
+                    "If the camera is to the animal's right: TR, TL, BL, BR."
+                }, OVERLAY_TOP_LEFT, 0.30);
+                key = cv::waitKeyEx(5);
+                if (handleOverlayToggleKey(key)) {
+                    break;
                 }
-                cv::imshow("configGUI", disp_frame);
-                key = cv::waitKey(5);
                 
                 /// State machine logic.
                 if ((key == 0x0d) || (key == 0x0a)) {   // return
@@ -1133,6 +1477,7 @@ bool ConfigGui::run()
                         // dump corner points to config file
 						if (!saveC2ATransform(c2a_src, R, t)) {
 							LOG_ERR("Error writing coordinate transform to config file!");
+                                had_error = true;
                             open = false;      // will cause exit
 						}
                         
@@ -1185,6 +1530,7 @@ bool ConfigGui::run()
 
                 if (_cfg.write() <= 0) {
                     LOG_ERR("Error writing to config file (%s)!", _config_fn.c_str());
+                    had_error = true;
                     open = false;      // will cause exit
                 }
             
@@ -1236,6 +1582,7 @@ bool ConfigGui::run()
     LOG("Writing config image to disk (%s)..", cfg_img_fn.c_str());
 	if (!cv::imwrite(cfg_img_fn, disp_frame)) {
 		LOG_ERR("Error writing config image to disk!");
+        had_error = true;
 	}
 
     //// compute thresholding priors
@@ -1270,15 +1617,16 @@ bool ConfigGui::run()
     //    }
     //    frame = maximg - minimg;
     //}
+    _cancelled = user_cancelled;
 
-
-
-    if (open) {
-        LOG("Configuration complete!");
-    } else {
+    if (had_error) {
         LOG_WRN("\n\nWarning! There were errors and the configuration file may not have been properly updated. Please run configuration again.");
+    } else if (user_cancelled) {
+        LOG("Configuration cancelled by user.");
+    } else {
+        LOG("Configuration complete!");
     }
     
     LOG("Exiting configuration!");
-    return open;
+    return !had_error;
 }

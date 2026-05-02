@@ -28,10 +28,11 @@ int main(int argc, char *argv[])
 {
 	PRINT("///");
     PRINT("/// configGui:\tA GUI for configuring FicTrac.\n///\t\tThis program must be run for each new input source,\n///\t\tor if the camera is moved.\n///");
-    PRINT("/// Usage:\tconfigGui CONFIG_FN [-v LOG_VERBOSITY -s SRC_FN]\n///");
+    PRINT("/// Usage:\tconfigGui CONFIG_FN [-v LOG_VERBOSITY -s SRC_FN | -c CAMERA_ID]\n///");
     PRINT("/// \tCONFIG_FN\tPath to input/output config file.");
     PRINT("/// \tLOG_VERBOSITY\t[Optional] One of DBG, INF, WRN, ERR.");
     PRINT("/// \tSRC_FN\t\t[Optional] Override src_fn param in config file.");
+    PRINT("/// \tCAMERA_ID\t[Optional] Override src_fn with a live camera index for configuration.");
     PRINT("///");
 	PRINT("/// Version: %d.%d.%d (build date: %s)", FICTRAC_VERSION_MAJOR, FICTRAC_VERSION_MIDDLE, FICTRAC_VERSION_MINOR, __DATE__);
     PRINT("///\n");
@@ -46,8 +47,6 @@ int main(int argc, char *argv[])
                 log_level = argv[i];
             } else {
                 LOG_ERR("-v/--verbosity requires one argument (debug < info (default) < warn < error)!");
-                PRINT("\n\nHit ENTER to exit..");
-                getchar_clean();
                 return -1;
             }
         } else if ((string(argv[i]) == "--src") || (string(argv[i]) == "-s")) {
@@ -58,6 +57,13 @@ int main(int argc, char *argv[])
                 LOG_ERR("-s/--src requires one argument!");
 				return -1;
 			}
+        } else if ((string(argv[i]) == "--camera") || (string(argv[i]) == "-c")) {
+            if (++i < argc) {
+                src_fn = argv[i];
+            } else {
+                LOG_ERR("-c/--camera requires one argument!");
+                return -1;
+            }
         } else {
             config_fn = argv[i];
         }
@@ -69,17 +75,19 @@ int main(int argc, char *argv[])
     /// Init config object, parse config file.
     ConfigGui cfg(config_fn, src_fn);
     if (!cfg.is_open()) {
+        if (cfg.wasCancelled()) {
+            return 0;
+        }
         LOG_ERR("Error loading parameters from specified config file (%s)!", config_fn.c_str());
-        PRINT("\n\nHit ENTER to exit..");
-        getchar_clean();
         return -1;
     }
     
     /// Run configuration GUI.
     bool ret = cfg.run();
 
-    PRINT("\n\nHit ENTER to exit..");
-    getchar_clean();
+    if (cfg.wasCancelled()) {
+        return 0;
+    }
 
     return ret ? 0 : 1;
 }

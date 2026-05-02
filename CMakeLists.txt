@@ -128,6 +128,18 @@ add_library(fictrac_core STATIC ${LIBFICTRAC_SRCS})
 add_executable(configGui ${PROJECT_SOURCE_DIR}/exec/configGui.cpp)
 add_executable(fictrac ${PROJECT_SOURCE_DIR}/exec/fictrac.cpp)
 
+if(WIN32)
+    set(FICTRAC_RUNTIME_SYNC_DIR "${PROJECT_SOURCE_DIR}/../../fictrac-spinnaker")
+
+    function(sync_runtime_binary target_name runtime_name)
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${FICTRAC_RUNTIME_SYNC_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${target_name}>" "${FICTRAC_RUNTIME_SYNC_DIR}/${runtime_name}"
+            COMMENT "Syncing ${runtime_name} to ${FICTRAC_RUNTIME_SYNC_DIR}"
+        )
+    endfunction()
+endif()
+
 # add preprocessor definitions
 # PUBLIC means defs will be inherited by linked executables
 target_compile_definitions(fictrac_core PUBLIC _CRT_SECURE_NO_WARNINGS NOMINMAX)
@@ -166,6 +178,12 @@ target_link_libraries(configGui fictrac_core)
 add_dependencies(configGui fictrac_core)
 target_link_libraries(fictrac fictrac_core)
 add_dependencies(fictrac fictrac_core)
+
+if(WIN32)
+    sync_runtime_binary(configGui "configGui.exe")
+    sync_runtime_binary(fictrac "fictrac.exe")
+    sync_runtime_binary(fictrac "fictrac-spinnaker.exe")
+endif()
 
 # if(WIN32)
 	# set_target_properties(configGui PROPERTIES LINK_FLAGS /LTCG)

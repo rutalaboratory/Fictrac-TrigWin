@@ -23,6 +23,59 @@ using namespace FlyCapture2;
 
 using cv::Mat;
 
+std::vector<std::string> PGRSource::describeAvailableCameras()
+{
+    std::vector<std::string> cameras;
+
+    try {
+#if defined(PGR_USB3)
+        SystemPtr system = System::GetInstance();
+        CameraList camList = system->GetCameras();
+        unsigned int numCameras = camList.GetSize();
+
+        for (unsigned int index = 0; index < numCameras; ++index) {
+            CameraPtr cam = camList.GetByIndex(index);
+            GenApi::INodeMap& nodeMap = cam->GetTLDeviceNodeMap();
+
+            std::string model = "Unknown model";
+            GenApi::CStringPtr modelNode = nodeMap.GetNode("DeviceModelName");
+            if (IsAvailable(modelNode) && IsReadable(modelNode)) {
+                model = modelNode->GetValue().c_str();
+            }
+
+            std::string serial = "unknown serial";
+            GenApi::CStringPtr serialNode = nodeMap.GetNode("DeviceSerialNumber");
+            if (IsAvailable(serialNode) && IsReadable(serialNode)) {
+                serial = serialNode->GetValue().c_str();
+            }
+
+            cameras.push_back("Camera " + std::to_string(index) + ": " + model + " [" + serial + "]");
+        }
+
+        camList.Clear();
+        system->ReleaseInstance();
+#elif defined(PGR_USB2)
+        BusManager busMgr;
+        unsigned int numCameras = 0;
+        if (busMgr.GetNumOfCameras(&numCameras) == PGRERROR_OK) {
+            for (unsigned int index = 0; index < numCameras; ++index) {
+                cameras.push_back("Camera " + std::to_string(index));
+            }
+        }
+#endif // PGR_USB3
+    }
+#if defined(PGR_USB3)
+    catch (Spinnaker::Exception& e) {
+        LOG_ERR("Error enumerating cameras! Error was: %s", e.what());
+    }
+#endif // PGR_USB3
+    catch (...) {
+        LOG_ERR("Error enumerating cameras!");
+    }
+
+    return cameras;
+}
+
 PGRSource::PGRSource(int index, long int first_frame_timeout_ms)
 {
     try {
