@@ -28,6 +28,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/videoio.hpp>
 
+#include <filesystem>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -53,6 +54,22 @@ bool fail_invalid_config_value(const string& key, const string& message)
 {
     LOG_ERR("Invalid config value for %s: %s", key.c_str(), message.c_str());
     return false;
+}
+
+bool validate_output_parent_path(const string& output_path, const string& description)
+{
+    std::error_code error_code;
+    std::filesystem::path parent_path = std::filesystem::path(output_path).parent_path();
+    if (parent_path.empty()) {
+        parent_path = ".";
+    }
+
+    if (!std::filesystem::exists(parent_path, error_code) || !std::filesystem::is_directory(parent_path, error_code)) {
+        LOG_ERR("Error! Unable to prepare %s (%s): parent directory does not exist.", description.c_str(), output_path.c_str());
+        return false;
+    }
+
+    return true;
 }
 
 bool validate_optional_bool(ConfigParser& cfg, const string& key, bool& value)
@@ -370,24 +387,29 @@ bool intersectSphere(const double r, const double camVec[3], double sphereVec[3]
 ///
 /// 
 ///
-Trackball::Trackball(string cfg_fn, string src_override)
-    : _init(false), _reset(true), _clean_map(true), _active(true), _kill(false), _do_reset(false), _failed(false)
+bool Trackball::validateConfigFile(const string& cfg_fn)
+{
+    ConfigParser cfg;
+    if (cfg.read(cfg_fn) <= 0) {
+        LOG_ERR("Error parsing config file (%s)!", cfg_fn.c_str());
+        return false;
+    }
+    return validate_runtime_config_schema(cfg);
+}
+
+Trackball::Trackball(string cfg_fn, string src_override, StartupMode startup_mode)
+    : _init(false), _reset(true), _clean_map(true), _active(true), _kill(false), _do_reset(false), _failed(false), _startup_mode(startup_mode)
 {
     /// Save execTime for outptut file naming.
     string exec_time = execTime();
 
     /// Load and parse config file.
-    if (_cfg.read(cfg_fn) <= 0) {
-        LOG_ERR("Error parsing config file (%s)!", cfg_fn.c_str());
+    if (!validateConfigFile(cfg_fn)) {
         _failed = true;
         _active = false;
         return;
     }
-    if (!validate_runtime_config_schema(_cfg)) {
-        _failed = true;
-        _active = false;
-        return;
-    }
+    _cfg.read(cfg_fn);
 
     /// Open frame source and set fps.
     string src_fn = _cfg("src_fn");
@@ -800,14 +822,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
         _sphere_model, _sphere_map,
         _roi_mask, _p1s_lut);
 
-    /// Output.
     string data_fn = _base_fn + "-" + exec_time + ".dat";
-    _data_log = make_unique<Recorder>(RecorderInterface::RecordType::FILE, data_fn);
-    if (!_data_log->is_active()) {
-        LOG_ERR("Error! Unable to open output data log file (%s).", data_fn.c_str());
-        _active = false;
-        return;
-    }
 
     int sock_port = SOCK_PORT_DEFAULT;
     _do_sock_output = false;
@@ -819,8 +834,8 @@ Trackball::Trackball(string cfg_fn, string src_override)
             return;
         }
     }
+    string sock_host = SOCK_HOST_DEFAULT;
     if (sock_port > 0) {
-        string sock_host = SOCK_HOST_DEFAULT;
         if (_cfg.hasKey("sock_host")) {
             if (!_cfg.getStr("sock_host", sock_host) || sock_host.empty()) {
                 fail_invalid_config_value("sock_host", "expected a non-empty host string");
@@ -834,14 +849,6 @@ Trackball::Trackball(string cfg_fn, string src_override)
             _cfg.add("sock_host", sock_host);
         }
 
-        _data_sock = make_unique<Recorder>(RecorderInterface::RecordType::SOCK, sock_host + ":" + std::to_string(sock_port));
-        if (!_data_sock->is_active()) {
-            LOG_ERR("Error! Unable to open output data socket (%s:%d).", sock_host.c_str() ,sock_port);
-            _failed = true;
-            _active = false;
-            return;
-        }
-        _do_sock_output = true;
     }
 
     string com_port = _cfg("com_port");
@@ -861,14 +868,6 @@ Trackball::Trackball(string cfg_fn, string src_override)
             _cfg.add("com_baud", com_baud);
         }
 
-        _data_com = make_unique<Recorder>(RecorderInterface::RecordType::COM, com_port + "@" + std::to_string(com_baud));
-        if (!_data_com->is_active()) {
-            LOG_ERR("Error! Unable to open output data com port (%s@%d).", com_port.c_str(), com_baud);
-            _failed = true;
-            _active = false;
-            return;
-        }
-        _do_com_output = true;
     }
 
     /// Display.
@@ -917,11 +916,17 @@ Trackball::Trackball(string cfg_fn, string src_override)
         _do_display = true;
     }
 
+    string debug_video_fn;
+    string debug_frame_log_fn;
+    bool do_raw_recording = false;
+    int fourcc = 0;
+    string cstr;
+    string fext;
+
     // do video stuff
     if (_save_raw || _save_debug) {
         // find codec
-        int fourcc = 0;
-        string cstr = _cfg("vid_codec"), fext;
+        cstr = _cfg("vid_codec");
         if (!cstr.empty()) {
             bool found_codec = false;
             for (const auto& codec : CODECS) {
@@ -959,45 +964,126 @@ Trackball::Trackball(string cfg_fn, string src_override)
 
         // raw input video
         if (_save_raw) {
-            double fps = source->getFPS();
-            if (fps <= 0) {
-                fps = (src_fps > 0) ? src_fps : 25;   // if we can't get fps from source, then use fps from config or - if not specified - default to 25 fps.
-            }
-            LOG_DBG("Opening %s for chunked raw frame writing (%dx%d @ %f FPS)", (_base_fn + "-raw-" + exec_time).c_str(), source->getWidth(), source->getHeight(), fps);
-            if (!openRawFrameRecording(exec_time, source->getWidth(), source->getHeight(), fps)) {
-                _failed = true;
-                _active = false;
-                return;
-            }
+            do_raw_recording = true;
         }
 
         // debug output video
         if (_save_debug) {
-            string vid_fn = _base_fn + "-dbg-" + exec_time + "." + fext;
-            double fps = source->getFPS();
-            if (fps <= 0) {
-                fps = (src_fps > 0) ? src_fps : 25;   // if we can't get fps from source, then use fps from config or - if not specified - default to 25 fps.
-            }
-            LOG_DBG("Opening %s for video writing (%s %dx%d @ %f FPS)", vid_fn.c_str(), cstr.c_str(), 4 * DRAW_CELL_DIM, 3 * DRAW_CELL_DIM, fps);
-            _debug_vid.open(vid_fn, fourcc, fps, cv::Size(4 * DRAW_CELL_DIM, 3 * DRAW_CELL_DIM));
-            if (!_debug_vid.isOpened()) {
-                LOG_ERR("Error! Unable to open debug output video (%s).", vid_fn.c_str());
+            debug_video_fn = _base_fn + "-dbg-" + exec_time + "." + fext;
+        }
+
+        // create output file containing log lines corresponding to debug-video frames, for synching video output
+        if (_save_debug) {
+            debug_frame_log_fn = _base_fn + "-vidLogFrames-" + exec_time + ".txt";
+        }
+    }
+
+    if (_startup_mode == StartupMode::Preflight) {
+        if (!validate_output_parent_path(data_fn, "output data log file")) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+        if (do_raw_recording && !validate_output_parent_path(_base_fn + "-raw-" + exec_time + "-index.csv", "raw frame outputs")) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+        if (!debug_video_fn.empty() && !validate_output_parent_path(debug_video_fn, "debug output video")) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+        if (!debug_frame_log_fn.empty() && !validate_output_parent_path(debug_frame_log_fn, "debug video frame log")) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+        LOG("Preflight checks passed for %s.", cfg_fn.c_str());
+        _active = false;
+        return;
+    }
+
+    /// Output.
+    _data_log = make_unique<Recorder>(RecorderInterface::RecordType::FILE, data_fn);
+    if (!_data_log->is_active()) {
+        LOG_ERR("Error! Unable to open output data log file (%s).", data_fn.c_str());
+        _failed = true;
+        _active = false;
+        return;
+    }
+
+    if (sock_port > 0) {
+        _data_sock = make_unique<Recorder>(RecorderInterface::RecordType::SOCK, sock_host + ":" + std::to_string(sock_port));
+        if (!_data_sock->is_active()) {
+            LOG_ERR("Error! Unable to open output data socket (%s:%d).", sock_host.c_str() ,sock_port);
+            _failed = true;
+            _active = false;
+            return;
+        }
+        _do_sock_output = true;
+    }
+
+    if (com_port.length() > 0) {
+        int com_baud = COM_BAUD_DEFAULT;
+        if (_cfg.hasKey("com_baud")) {
+            if (!_cfg.getInt("com_baud", com_baud) || (com_baud <= 0)) {
+                fail_invalid_config_value("com_baud", "expected a positive integer");
                 _failed = true;
                 _active = false;
                 return;
             }
         }
+        else {
+            LOG_WRN("Warning! Using default value for com_baud (%d).", com_baud);
+            _cfg.add("com_baud", com_baud);
+        }
 
-        // create output file containing log lines corresponding to debug-video frames, for synching video output
-        if (_save_debug) {
-            string fn = _base_fn + "-vidLogFrames-" + exec_time + ".txt";
-            _vid_frames = make_unique<Recorder>(RecorderInterface::RecordType::FILE, fn);
-            if (!_vid_frames->is_active()) {
-                LOG_ERR("Error! Unable to open output video frame number log file (%s).", fn.c_str());
-                _failed = true;
-                _active = false;
-                return;
-            }
+        _data_com = make_unique<Recorder>(RecorderInterface::RecordType::COM, com_port + "@" + std::to_string(com_baud));
+        if (!_data_com->is_active()) {
+            LOG_ERR("Error! Unable to open output data com port (%s@%d).", com_port.c_str(), com_baud);
+            _failed = true;
+            _active = false;
+            return;
+        }
+        _do_com_output = true;
+    }
+
+    if (do_raw_recording) {
+        double fps = source->getFPS();
+        if (fps <= 0) {
+            fps = (src_fps > 0) ? src_fps : 25;
+        }
+        LOG_DBG("Opening %s for chunked raw frame writing (%dx%d @ %f FPS)", (_base_fn + "-raw-" + exec_time).c_str(), source->getWidth(), source->getHeight(), fps);
+        if (!openRawFrameRecording(exec_time, source->getWidth(), source->getHeight(), fps)) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+
+    if (!debug_video_fn.empty()) {
+        double fps = source->getFPS();
+        if (fps <= 0) {
+            fps = (src_fps > 0) ? src_fps : 25;
+        }
+        LOG_DBG("Opening %s for video writing (%s %dx%d @ %f FPS)", debug_video_fn.c_str(), cstr.c_str(), 4 * DRAW_CELL_DIM, 3 * DRAW_CELL_DIM, fps);
+        _debug_vid.open(debug_video_fn, fourcc, fps, cv::Size(4 * DRAW_CELL_DIM, 3 * DRAW_CELL_DIM));
+        if (!_debug_vid.isOpened()) {
+            LOG_ERR("Error! Unable to open debug output video (%s).", debug_video_fn.c_str());
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+
+    if (!debug_frame_log_fn.empty()) {
+        _vid_frames = make_unique<Recorder>(RecorderInterface::RecordType::FILE, debug_frame_log_fn);
+        if (!_vid_frames->is_active()) {
+            LOG_ERR("Error! Unable to open output video frame number log file (%s).", debug_frame_log_fn.c_str());
+            _failed = true;
+            _active = false;
+            return;
         }
     }
 

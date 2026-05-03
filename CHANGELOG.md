@@ -8,6 +8,7 @@
 - Native sample-video parity regression test for the bundled offline sample input.
 - Native recorder shutdown regression test covering queued-write drain behavior during teardown.
 - Native parser and runtime config-validation regression tests covering malformed lines, duplicate keys, strict scalar/vector parsing, and semantic validation of present config values.
+- Native `--validate` and `--preflight` CLI modes for config-only and startup-without-tracking checks before a real run.
 
 ### Changed
 

@@ -25,7 +25,7 @@ int main(int argc, char *argv[])
 {
      PRINT("///");
      PRINT("/// FicTrac:\tA webcam-based method for generating fictive paths.\n///");
-     PRINT("/// Usage:\tfictrac CONFIG_FN [-v LOG_VERBOSITY -s SRC_FN]\n///");
+    PRINT("/// Usage:\tfictrac CONFIG_FN [-v LOG_VERBOSITY -s SRC_FN] [--validate|--preflight]\n///");
      PRINT("/// \tCONFIG_FN\tPath to input config file (defaults to config.txt).");
      PRINT("/// \tLOG_VERBOSITY\t[Optional] One of DBG, INF, WRN, ERR.");
      PRINT("/// \tSRC_FN\t\t[Optional] Override src_fn param in config file.");
@@ -38,6 +38,8 @@ int main(int argc, char *argv[])
 	string config_fn = "config.txt";
     string src_fn = "";
     bool do_stats = false;
+    bool validate_only = false;
+    bool preflight_only = false;
 	for (int i = 1; i < argc; ++i) {
 		if ((string(argv[i]) == "--verbosity") || (string(argv[i]) == "-v")) {
 			if (++i < argc) {
@@ -50,6 +52,12 @@ int main(int argc, char *argv[])
         }
         else if (string(argv[i]) == "--stats") {
             do_stats = true;
+        }
+        else if (string(argv[i]) == "--validate") {
+            validate_only = true;
+        }
+        else if (string(argv[i]) == "--preflight") {
+            preflight_only = true;
         }
         else if ((string(argv[i]) == "--src") || (string(argv[i]) == "-s")) {
             if (++i < argc) {
@@ -65,8 +73,22 @@ int main(int argc, char *argv[])
 		}
 	}
 
+    if (validate_only && preflight_only) {
+        LOG_ERR("--validate and --preflight are mutually exclusive.");
+        return -1;
+    }
+
     /// Set logging level.
     Logger::setVerbosity(log_level);
+
+    if (validate_only) {
+        const bool valid = Trackball::validateConfigFile(config_fn);
+        if (valid) {
+            LOG("Config validation passed for %s.", config_fn.c_str());
+            return 0;
+        }
+        return 1;
+    }
 
 	// Catch console stop signals and let Trackball unwind cleanly.
     signal(SIGINT, ctrlcHandler);
@@ -81,8 +103,15 @@ int main(int argc, char *argv[])
         LOG("Set process priority to HIGH!");
     }
 
-    unique_ptr<Trackball> tracker = make_unique<Trackball>(config_fn, src_fn);
+    const Trackball::StartupMode startup_mode = preflight_only ? Trackball::StartupMode::Preflight : Trackball::StartupMode::Run;
+    unique_ptr<Trackball> tracker = make_unique<Trackball>(config_fn, src_fn, startup_mode);
     const bool tracker_failed_to_start = !tracker->isActive() && tracker->hasFailed();
+
+    if (preflight_only) {
+        const bool tracker_failed = tracker->hasFailed();
+        tracker.reset();
+        return tracker_failed ? 1 : 0;
+    }
 
     /// Now Trackball has spawned our worker threads, we set this thread to low priority.
     SetThreadNormalPriority();
