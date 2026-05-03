@@ -34,6 +34,8 @@ private:
 
 private:
     std::atomic<bool> _active;
+    std::atomic<bool> _accepting_messages;
+    std::atomic<bool> _write_failed;
 
     std::unique_ptr<RecorderInterface> _record;
 
