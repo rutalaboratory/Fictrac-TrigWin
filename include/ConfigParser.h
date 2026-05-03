@@ -25,6 +25,7 @@ public:
     int read(std::string fn);
     int write(std::string fn);
     int write() { return write(_fn); }
+    bool hasKey(const std::string& key) const;
 
     /// Quick accessor functions
     std::string operator()(std::string key) const;

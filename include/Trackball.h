@@ -96,6 +96,7 @@ public:
     ~Trackball();
 
     bool isActive() { return _active; }
+    bool hasFailed() const { return _failed; }
     void terminate() { _kill = true; }
     std::shared_ptr<Trackball::DATA> getState();
     void dumpStats();
@@ -191,6 +192,6 @@ private:
     std::unique_ptr<Recorder> _data_log, _data_sock, _data_com, _vid_frames;
 
     /// Thread stuff.
-    std::atomic_bool _active, _kill, _do_reset;
+    std::atomic_bool _active, _kill, _do_reset, _failed;
     std::unique_ptr<std::thread> _thread;
 };

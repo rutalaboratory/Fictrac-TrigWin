@@ -7,6 +7,7 @@
 - Windows-triggered FicTrac fork update package refreshed from the validated MultiBiOS vendor tree.
 - Native sample-video parity regression test for the bundled offline sample input.
 - Native recorder shutdown regression test covering queued-write drain behavior during teardown.
+- Native parser and runtime config-validation regression tests covering malformed lines, duplicate keys, strict scalar/vector parsing, and semantic validation of present config values.
 
 ### Changed
 
@@ -18,6 +19,7 @@
 - Debug-path history maintenance and display-frame handoff now stay in the draw path so the tracking loop no longer clones source and ROI frames just to feed the visualization canvas.
 - ConfigGUI prompts and method selection now run inside the OpenCV window instead of splitting interaction between the GUI and terminal.
 - ConfigGUI live-camera selection can be done from an in-window chooser before opening a numeric PGR source.
+- Runtime startup now validates structured ROI/C2A config keys and ignored-path option values up front, so malformed present values fail even when a fallback path would otherwise mask them.
 
 ### Fixed
 
@@ -27,6 +29,10 @@
 - ConfigGUI keep/reconfigure prompts no longer freeze the window while waiting for terminal-style input.
 - ConfigGUI compact footer/help overlays wrap correctly and avoid the previous oversized instruction panel behavior.
 - ConfigGUI user cancellation now exits cleanly instead of being reported as a runtime failure.
+- Config files with malformed lines, duplicate keys, trailing junk scalars, or malformed vectors now fail parsing instead of being partially accepted.
+- FicTrac startup no longer rewrites runtime config files just to inject defaults during ordinary tracking startup.
+- Present-but-invalid runtime config values now fail fast across scalar, vector, and enumerated keys instead of silently falling back to defaults or alternate paths.
+- Native FicTrac now exits non-zero when startup or runtime failure occurs, so downstream launchers can distinguish real failures from clean shutdown.
 
 ## Initial Publication Note
 

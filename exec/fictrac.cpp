@@ -82,6 +82,7 @@ int main(int argc, char *argv[])
     }
 
     unique_ptr<Trackball> tracker = make_unique<Trackball>(config_fn, src_fn);
+    const bool tracker_failed_to_start = !tracker->isActive() && tracker->hasFailed();
 
     /// Now Trackball has spawned our worker threads, we set this thread to low priority.
     SetThreadNormalPriority();
@@ -95,12 +96,16 @@ int main(int argc, char *argv[])
     }
 
     /// Save the eventual template to disk.
-    tracker->writeTemplate();
+    if (!tracker_failed_to_start) {
+        tracker->writeTemplate();
+    }
 
     /// If we're running in test mode, print some stats.
     if (do_stats) {
         tracker->dumpStats();
     }
+
+    const bool tracker_failed = tracker->hasFailed();
 
     /// Try to force release of all objects.
     tracker.reset();
@@ -110,5 +115,5 @@ int main(int argc, char *argv[])
 
     //PRINT("\n\nHit ENTER to exit..");
     //getchar_clean();
-    return 0;
+    return tracker_failed ? 1 : 0;
 }
