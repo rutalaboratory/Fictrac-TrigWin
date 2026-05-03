@@ -34,6 +34,11 @@
 class Trackball
 {
 public:
+    enum class StartupMode {
+        Run,
+        Preflight
+    };
+
     /// Data.
     struct DATA {
         // trackball state
@@ -92,8 +97,10 @@ public:
     };
 
 public:
-    Trackball(std::string cfg_fn, std::string src_override = "");
+    Trackball(std::string cfg_fn, std::string src_override = "", StartupMode startup_mode = StartupMode::Run);
     ~Trackball();
+
+    static bool validateConfigFile(const std::string& cfg_fn);
 
     bool isActive() { return _active; }
     bool hasFailed() const { return _failed; }
@@ -190,6 +197,7 @@ private:
     std::unique_ptr<FrameGrabber> _frameGrabber;
     bool _do_sock_output, _do_com_output;
     std::unique_ptr<Recorder> _data_log, _data_sock, _data_com, _vid_frames;
+    StartupMode _startup_mode;
 
     /// Thread stuff.
     std::atomic_bool _active, _kill, _do_reset, _failed;

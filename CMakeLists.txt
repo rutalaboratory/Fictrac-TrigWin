@@ -201,6 +201,11 @@ if(BUILD_TESTING)
     target_link_libraries(config_value_validation_test fictrac_core)
     add_dependencies(config_value_validation_test fictrac_core)
     add_test(NAME config_value_validation_test COMMAND config_value_validation_test)
+
+    add_executable(preflight_cli_test ${PROJECT_SOURCE_DIR}/tests/preflight_cli_test.cpp)
+    target_link_libraries(preflight_cli_test fictrac_core)
+    add_dependencies(preflight_cli_test fictrac_core)
+    add_test(NAME preflight_cli_test COMMAND preflight_cli_test)
 endif()
 
 if(WIN32)
