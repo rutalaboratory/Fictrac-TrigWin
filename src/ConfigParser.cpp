@@ -14,9 +14,82 @@
 #include <exception>    // try, catch
 #include <algorithm>    // erase, remove
 #include <iomanip>
+#include <sstream>
 
 using std::string;
 using std::vector;
+
+namespace {
+
+string trim_copy(const string& value)
+{
+    const string whitespace = " \t\n\r";
+    const std::size_t begin = value.find_first_not_of(whitespace);
+    if (begin == string::npos) {
+        return "";
+    }
+    const std::size_t end = value.find_last_not_of(whitespace);
+    return value.substr(begin, end - begin + 1);
+}
+
+template <typename NumberT>
+bool parse_number_strict(const string& raw_value, NumberT& parsed_value, const char* type_name, const string& key)
+{
+    const string value = trim_copy(raw_value);
+    std::size_t consumed = 0;
+    try {
+        if constexpr (std::is_same<NumberT, int>::value) {
+            parsed_value = std::stoi(value, &consumed);
+        }
+        else {
+            parsed_value = std::stod(value, &consumed);
+        }
+    }
+    catch (std::exception& e) {
+        LOG_ERR("Error parsing config file value (%s : %s) as %s! Error was: %s", key.c_str(), raw_value.c_str(), type_name, e.what());
+        return false;
+    }
+
+    if (consumed != value.size()) {
+        LOG_ERR("Error parsing config file value (%s : %s) as %s! Trailing content is not allowed.", key.c_str(), raw_value.c_str(), type_name);
+        return false;
+    }
+    return true;
+}
+
+template <typename NumberT>
+bool parse_flat_vector_strict(const string& raw_value, vector<NumberT>& parsed_values, const char* type_name, const string& key)
+{
+    const string value = trim_copy(raw_value);
+    if ((value.size() < 2) || (value.front() != '{') || (value.back() != '}')) {
+        LOG_ERR("Error parsing config file value (%s : %s) as %s vector! Expected outer braces.", key.c_str(), raw_value.c_str(), type_name);
+        return false;
+    }
+
+    string inner = trim_copy(value.substr(1, value.size() - 2));
+    parsed_values.clear();
+    if (inner.empty()) {
+        return true;
+    }
+    if ((inner.find('{') != string::npos) || (inner.find('}') != string::npos)) {
+        LOG_ERR("Error parsing config file value (%s : %s) as %s vector! Nested braces are not allowed.", key.c_str(), raw_value.c_str(), type_name);
+        return false;
+    }
+
+    std::replace(inner.begin(), inner.end(), ',', ' ');
+    std::stringstream stream(inner);
+    string token;
+    while (stream >> token) {
+        NumberT parsed_value{};
+        if (!parse_number_strict(token, parsed_value, type_name, key)) {
+            return false;
+        }
+        parsed_values.push_back(parsed_value);
+    }
+    return true;
+}
+
+} // namespace
 
 ///
 /// Default constructor.
@@ -183,6 +256,11 @@ string ConfigParser::operator()(string key) const
     return "";
 }
 
+bool ConfigParser::hasKey(const std::string& key) const
+{
+    return _data.find(key) != _data.end();
+}
+
 ///
 /// Retrieve string value corresponding to specified key from map.
 ///
@@ -202,12 +280,7 @@ bool ConfigParser::getStr(string key, string& val) {
 bool ConfigParser::getInt(string key, int& val) {
     string str;
     if (getStr(key, str)) {
-        try { val = stoi(str); }
-        catch (std::exception& e) {
-            LOG_ERR("Error parsing config file value (%s : %s) as INT! Error was: %s", key.c_str(), str.c_str(), e.what());
-            return false;
-        }
-        return true;
+        return parse_number_strict(str, val, "INT", key);
     }
     return false;
 }
@@ -218,12 +291,7 @@ bool ConfigParser::getInt(string key, int& val) {
 bool ConfigParser::getDbl(string key, double& val) {
     string str;
     if (getStr(key, str)) {
-        try { val = stod(str); }
-        catch (std::exception& e) {
-			LOG_ERR("Error parsing config file value (%s : %s) as DBL! Error was: %s", key.c_str(), str.c_str(), e.what());
-            return false;
-        }
-        return true;
+        return parse_number_strict(str, val, "DBL", key);
     }
     return false;
 }
@@ -234,6 +302,7 @@ bool ConfigParser::getDbl(string key, double& val) {
 bool ConfigParser::getBool(string key, bool& val) {
     string str;
     if (getStr(key, str)) {
+        str = trim_copy(str);
         if (!str.compare("Y") || !str.compare("y") || !str.compare("1")) {
             val = true;
             return true;
@@ -253,29 +322,9 @@ bool ConfigParser::getBool(string key, bool& val) {
 /// Retrieve vector of int values corresponding to specified key from map.
 ///
 bool ConfigParser::getVecInt(std::string key, vector<int>& val) {
-    /// Get value string.
     string str;
-    const string whitespace = ", \t\n";
     if (getStr(key, str)) {
-        val.clear();
-        
-        // start array from opening bracket
-        size_t begin, end = str.find_first_of("{");
-        while (end != string::npos) {
-            // extract value
-            begin = str.find_first_not_of(whitespace, end+1);
-            end = str.find_first_of(whitespace, begin);
-            string s = str.substr(begin,end-begin);
-            
-            // break when we hit closing bracket
-            if (s.substr(0,1) == "}") { break; }
-            try { val.push_back(stoi(s)); }
-            catch (std::exception& e) {
-				LOG_ERR("Error parsing config file value (%s : %s) as INT! Error was: %s", key.c_str(), s.c_str(), e.what());
-                return false;
-            }
-        }
-        return true;
+        return parse_flat_vector_strict(str, val, "INT", key);
     }
     return false;
 }
@@ -284,29 +333,9 @@ bool ConfigParser::getVecInt(std::string key, vector<int>& val) {
 /// Retrieve vector of double values corresponding to specified key from map.
 ///
 bool ConfigParser::getVecDbl(std::string key, vector<double>& val) {
-    /// Get value string.
     string str;
-    const string whitespace = ", \t\n";
     if (getStr(key, str)) {
-        val.clear();
-        
-        // start array from opening bracket
-        size_t begin, end = str.find_first_of("{");
-        while (end != string::npos) {
-            // extract value
-            begin = str.find_first_not_of(whitespace, end+1);
-            end = str.find_first_of(whitespace, begin);
-            string s = str.substr(begin,end-begin);
-            
-            // break when we hit closing bracket
-            if (s.substr(0,1) == "}") { break; }
-            try { val.push_back(stod(s)); }
-            catch (std::exception& e) {
-				LOG_ERR("Error parsing config file value (%s : %s) as DBL! Error was: %s", key.c_str(), s.c_str(), e.what());
-                return false;
-            }
-        }
-        return true;
+        return parse_flat_vector_strict(str, val, "DBL", key);
     }
     return false;
 }
@@ -315,35 +344,42 @@ bool ConfigParser::getVecDbl(std::string key, vector<double>& val) {
 /// Retrieve vector of vector of int values corresponding to specified key from map.
 ///
 bool ConfigParser::getVVecInt(std::string key, vector<vector<int> >& val) {
-    /// Get value string.
     string str;
-    const string whitespace = ", \t\n";
     if (getStr(key, str)) {
+        const string value = trim_copy(str);
         val.clear();
-        
-        // start array from opening bracket
-        size_t begin, end = str.find_first_of("{");
-        while (end != string::npos) {
-            // extract poly
-            vector<int> poly;
-            
-            // start array from opening bracket
-            end = str.find_first_of("{", end+1);
-            while (end != string::npos) {
-                // extract value
-                begin = str.find_first_not_of(whitespace, end+1);
-                end = str.find_first_of(whitespace, begin);
-                string s = str.substr(begin,end-begin);
-                
-                // break when we hit closing bracket
-                if (s.substr(0,1) == "}") { break; }
-                try { poly.push_back(stoi(s)); }
-                catch (std::exception& e) {
-					LOG_ERR("Error parsing config file value (%s : %s) as INT! Error was: %s", key.c_str(), s.c_str(), e.what());
-                    return false;
-                }
+
+        if ((value.size() < 2) || (value.front() != '{') || (value.back() != '}')) {
+            LOG_ERR("Error parsing config file value (%s : %s) as INT matrix! Expected outer braces.", key.c_str(), str.c_str());
+            return false;
+        }
+
+        const string inner = value.substr(1, value.size() - 2);
+        std::size_t index = 0;
+        while (index < inner.size()) {
+            while ((index < inner.size()) && ((inner[index] == ' ') || (inner[index] == '\t') || (inner[index] == '\n') || (inner[index] == ','))) {
+                ++index;
             }
-            if (!poly.empty()) { val.push_back(poly); }
+            if (index >= inner.size()) {
+                break;
+            }
+            if (inner[index] != '{') {
+                LOG_ERR("Error parsing config file value (%s : %s) as INT matrix! Expected nested braces.", key.c_str(), str.c_str());
+                return false;
+            }
+
+            const std::size_t close = inner.find('}', index + 1);
+            if (close == string::npos) {
+                LOG_ERR("Error parsing config file value (%s : %s) as INT matrix! Missing closing brace.", key.c_str(), str.c_str());
+                return false;
+            }
+
+            vector<int> poly;
+            if (!parse_flat_vector_strict("{" + inner.substr(index + 1, close - index - 1) + "}", poly, "INT", key)) {
+                return false;
+            }
+            val.push_back(poly);
+            index = close + 1;
         }
         return true;
     }

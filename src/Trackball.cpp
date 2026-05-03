@@ -36,6 +36,283 @@
 using namespace cv;
 using namespace std;
 
+namespace {
+
+string trim_copy(const string& value)
+{
+    const string whitespace = " \t\n\r";
+    const size_t begin = value.find_first_not_of(whitespace);
+    if (begin == string::npos) {
+        return "";
+    }
+    const size_t end = value.find_last_not_of(whitespace);
+    return value.substr(begin, end - begin + 1);
+}
+
+bool fail_invalid_config_value(const string& key, const string& message)
+{
+    LOG_ERR("Invalid config value for %s: %s", key.c_str(), message.c_str());
+    return false;
+}
+
+bool validate_optional_bool(ConfigParser& cfg, const string& key, bool& value)
+{
+    if (!cfg.hasKey(key)) {
+        return true;
+    }
+    return cfg.getBool(key, value);
+}
+
+bool validate_optional_int(ConfigParser& cfg, const string& key, int& value)
+{
+    if (!cfg.hasKey(key)) {
+        return true;
+    }
+    return cfg.getInt(key, value);
+}
+
+bool validate_optional_double(ConfigParser& cfg, const string& key, double& value)
+{
+    if (!cfg.hasKey(key)) {
+        return true;
+    }
+    return cfg.getDbl(key, value);
+}
+
+bool validate_optional_nonempty_string(ConfigParser& cfg, const string& key)
+{
+    if (!cfg.hasKey(key)) {
+        return true;
+    }
+
+    string value;
+    if (!cfg.getStr(key, value) || trim_copy(value).empty()) {
+        return fail_invalid_config_value(key, "expected a non-empty string value");
+    }
+    return true;
+}
+
+bool validate_optional_vector_int(ConfigParser& cfg, const string& key, size_t min_size, bool require_even_count, const string& message)
+{
+    if (!cfg.hasKey(key)) {
+        return true;
+    }
+
+    vector<int> values;
+    if (!cfg.getVecInt(key, values)) {
+        return false;
+    }
+    if ((values.size() < min_size) || (require_even_count && ((values.size() % 2) != 0))) {
+        return fail_invalid_config_value(key, message);
+    }
+    return true;
+}
+
+bool validate_optional_vector_double(ConfigParser& cfg, const string& key, size_t expected_size, const string& message)
+{
+    if (!cfg.hasKey(key)) {
+        return true;
+    }
+
+    vector<double> values;
+    if (!cfg.getVecDbl(key, values)) {
+        return false;
+    }
+    if (values.size() != expected_size) {
+        return fail_invalid_config_value(key, message);
+    }
+    return true;
+}
+
+bool validate_optional_ignore_polygons(ConfigParser& cfg)
+{
+    if (!cfg.hasKey("roi_ignr")) {
+        return true;
+    }
+
+    vector<vector<int>> polygons;
+    if (!cfg.getVVecInt("roi_ignr", polygons)) {
+        return false;
+    }
+    for (const auto& polygon : polygons) {
+        if ((polygon.size() < 6) || ((polygon.size() % 2) != 0)) {
+            return fail_invalid_config_value("roi_ignr", "expected polygon vertices as {x1, y1, x2, y2, ...} with at least 3 points per polygon");
+        }
+    }
+    return true;
+}
+
+bool validate_optional_c2a_source(ConfigParser& cfg)
+{
+    if (!cfg.hasKey("c2a_src")) {
+        return true;
+    }
+
+    string source_key;
+    if (!cfg.getStr("c2a_src", source_key)) {
+        return false;
+    }
+    source_key = trim_copy(source_key);
+    if (source_key.empty()) {
+        return fail_invalid_config_value("c2a_src", "expected one of c2a_cnrs_xy, c2a_cnrs_yz, or c2a_cnrs_xz");
+    }
+    const bool valid_plane =
+        (source_key == "c2a_cnrs_xy")
+        || (source_key == "c2a_cnrs_yz")
+        || (source_key == "c2a_cnrs_xz");
+    if (!valid_plane) {
+        return fail_invalid_config_value("c2a_src", "expected one of c2a_cnrs_xy, c2a_cnrs_yz, or c2a_cnrs_xz");
+    }
+
+    vector<int> points;
+    if (!cfg.getVecInt(source_key, points)) {
+        return fail_invalid_config_value("c2a_src", "expected the referenced corner set to be a valid integer vector with 4 XY points");
+    }
+    if (points.size() != 8) {
+        return fail_invalid_config_value("c2a_src", "expected the referenced corner set to contain exactly 4 XY points");
+    }
+    return true;
+}
+
+bool validate_vid_codec(ConfigParser& cfg)
+{
+    if (!cfg.hasKey("vid_codec")) {
+        return true;
+    }
+
+    string codec;
+    if (!cfg.getStr("vid_codec", codec)) {
+        return false;
+    }
+    codec = trim_copy(codec);
+    if ((codec == "h264") || (codec == "xvid") || (codec == "mpg4") || (codec == "mjpg") || (codec == "raw")) {
+        return true;
+    }
+    return fail_invalid_config_value("vid_codec", "expected one of h264, xvid, mpg4, mjpg, raw");
+}
+
+bool validate_threshold_transform(ConfigParser& cfg)
+{
+    if (!cfg.hasKey("thr_rgb_tfrm")) {
+        return true;
+    }
+
+    string transform;
+    if (!cfg.getStr("thr_rgb_tfrm", transform)) {
+        return false;
+    }
+    transform = trim_copy(transform);
+    const bool valid_transform =
+        (transform == "red") || (transform == "r")
+        || (transform == "green") || (transform == "g")
+        || (transform == "blue") || (transform == "b")
+        || (transform == "grey") || (transform == "gray");
+    if (!valid_transform) {
+        return fail_invalid_config_value("thr_rgb_tfrm", "expected red/r, green/g, blue/b, or grey/gray");
+    }
+    return true;
+}
+
+bool validate_runtime_config_schema(ConfigParser& cfg)
+{
+    if (!validate_optional_nonempty_string(cfg, "src_fn")) {
+        return false;
+    }
+
+    if (cfg.hasKey("src_fps")) {
+        double src_fps = -1;
+        if (!cfg.getDbl("src_fps", src_fps)) {
+            return false;
+        }
+        if ((src_fps != -1.0) && (src_fps <= 0.0)) {
+            return fail_invalid_config_value("src_fps", "expected -1 or a positive floating-point value");
+        }
+    }
+
+    if (cfg.hasKey("src_fps_mode")) {
+        string fps_mode;
+        if (!cfg.getStr("src_fps_mode", fps_mode)) {
+            return false;
+        }
+        fps_mode = trim_copy(fps_mode);
+        if ((fps_mode != "auto") && (fps_mode != "device") && (fps_mode != "hardware_triggered")) {
+            return fail_invalid_config_value("src_fps_mode", "expected auto, device, or hardware_triggered");
+        }
+    }
+
+    int first_frame_timeout_ms = 0;
+    if (!validate_optional_int(cfg, "src_first_frame_timeout_ms", first_frame_timeout_ms)) {
+        return false;
+    }
+    if (!validate_optional_vector_double(cfg, "roi_c", 3, "expected exactly 3 floating-point values")) {
+        return false;
+    }
+    if (cfg.hasKey("roi_r")) {
+        double roi_radius = -1;
+        if (!cfg.getDbl("roi_r", roi_radius) || (roi_radius <= 0)) {
+            return fail_invalid_config_value("roi_r", "expected a positive floating-point value");
+        }
+    }
+    if (cfg.hasKey("roi_c") != cfg.hasKey("roi_r")) {
+        return fail_invalid_config_value("roi_c", "roi_c and roi_r must either both be present or both be omitted");
+    }
+    if (!validate_optional_vector_int(cfg, "roi_circ", 6, true, "expected at least 3 XY points encoded as {x1, y1, x2, y2, ...}")) {
+        return false;
+    }
+    if (!validate_optional_ignore_polygons(cfg)) {
+        return false;
+    }
+    if (!validate_optional_vector_double(cfg, "c2a_r", 3, "expected exactly 3 floating-point values")) {
+        return false;
+    }
+    if (!validate_optional_c2a_source(cfg)) {
+        return false;
+    }
+    if (!validate_optional_nonempty_string(cfg, "sock_host")) {
+        return false;
+    }
+    if (!validate_optional_nonempty_string(cfg, "com_port")) {
+        return false;
+    }
+    if (!validate_optional_nonempty_string(cfg, "sphere_map_fn")) {
+        return false;
+    }
+    if (!validate_vid_codec(cfg)) {
+        return false;
+    }
+    if (!validate_threshold_transform(cfg)) {
+        return false;
+    }
+
+    if (cfg.hasKey("opt_max_err")) {
+        double max_err = -1;
+        if (!cfg.getDbl("opt_max_err", max_err)) {
+            return false;
+        }
+        if ((max_err != -1.0) && (max_err < 0.0)) {
+            return fail_invalid_config_value("opt_max_err", "expected -1 or a non-negative floating-point value");
+        }
+    }
+
+    if (cfg.hasKey("sock_port")) {
+        int sock_port = -1;
+        if (!cfg.getInt("sock_port", sock_port) || (sock_port < -1) || (sock_port > 65535)) {
+            return fail_invalid_config_value("sock_port", "expected an integer in [-1, 65535]");
+        }
+    }
+
+    if (cfg.hasKey("com_baud")) {
+        int com_baud = 115200;
+        if (!cfg.getInt("com_baud", com_baud) || (com_baud <= 0)) {
+            return fail_invalid_config_value("com_baud", "expected a positive integer");
+        }
+    }
+
+    return true;
+}
+
+} // namespace
+
 const int DRAW_SPHERE_HIST_LENGTH = 1024;
 const int DRAW_CELL_DIM = 160;
 const int DRAW_FICTIVE_PATH_LENGTH = 1000;
@@ -94,7 +371,7 @@ bool intersectSphere(const double r, const double camVec[3], double sphereVec[3]
 /// 
 ///
 Trackball::Trackball(string cfg_fn, string src_override)
-    : _init(false), _reset(true), _clean_map(true), _active(true), _kill(false), _do_reset(false)
+    : _init(false), _reset(true), _clean_map(true), _active(true), _kill(false), _do_reset(false), _failed(false)
 {
     /// Save execTime for outptut file naming.
     string exec_time = execTime();
@@ -102,6 +379,12 @@ Trackball::Trackball(string cfg_fn, string src_override)
     /// Load and parse config file.
     if (_cfg.read(cfg_fn) <= 0) {
         LOG_ERR("Error parsing config file (%s)!", cfg_fn.c_str());
+        _failed = true;
+        _active = false;
+        return;
+    }
+    if (!validate_runtime_config_schema(_cfg)) {
+        _failed = true;
         _active = false;
         return;
     }
@@ -125,17 +408,28 @@ Trackball::Trackball(string cfg_fn, string src_override)
         int configured_first_frame_timeout_ms = static_cast<int>(first_frame_timeout_ms);
         PGRSource::FPSControlMode fps_control_mode = PGRSource::FPSControlMode::AUTO;
         string configured_fps_control_mode = PGRSource::fpsControlModeName(fps_control_mode);
-        if (_cfg.getInt("src_first_frame_timeout_ms", configured_first_frame_timeout_ms)) {
+        if (_cfg.hasKey("src_first_frame_timeout_ms")) {
+            if (!validate_optional_int(_cfg, "src_first_frame_timeout_ms", configured_first_frame_timeout_ms)) {
+                _failed = true;
+                _active = false;
+                return;
+            }
             first_frame_timeout_ms = static_cast<long int>(configured_first_frame_timeout_ms);
         }
         else {
             _cfg.add("src_first_frame_timeout_ms", configured_first_frame_timeout_ms);
         }
-        if (_cfg.getStr("src_fps_mode", configured_fps_control_mode)) {
+        if (_cfg.hasKey("src_fps_mode")) {
+            if (!_cfg.getStr("src_fps_mode", configured_fps_control_mode)) {
+                _failed = true;
+                _active = false;
+                return;
+            }
             if (!PGRSource::tryParseFPSControlMode(configured_fps_control_mode, fps_control_mode)) {
-                LOG_WRN("Unrecognized src_fps_mode (%s); defaulting to auto.", configured_fps_control_mode.c_str());
-                fps_control_mode = PGRSource::FPSControlMode::AUTO;
-                configured_fps_control_mode = PGRSource::fpsControlModeName(fps_control_mode);
+                fail_invalid_config_value("src_fps_mode", "expected auto, device, or hardware_triggered");
+                _failed = true;
+                _active = false;
+                return;
             }
         }
         else {
@@ -155,16 +449,24 @@ Trackball::Trackball(string cfg_fn, string src_override)
 #endif // PGR/BASLER
     if (!source->isOpen()) {
         LOG_ERR("Error! Could not open input frame source (%s)!", src_fn.c_str());
+        _failed = true;
         _active = false;
         return;
     }
     double src_fps = -1;
-    if (_cfg.getDbl("src_fps", src_fps) && (src_fps > 0)) {
-        LOG("Attempting to set source fps to %.2f", src_fps);
-        source->setFPS(src_fps);
+    if (_cfg.hasKey("src_fps")) {
+        if (!validate_optional_double(_cfg, "src_fps", src_fps)) {
+            _failed = true;
+            _active = false;
+            return;
+        }
     }
     else {
         _cfg.add("src_fps", src_fps);
+    }
+    if (src_fps > 0) {
+        LOG("Attempting to set source fps to %.2f", src_fps);
+        source->setFPS(src_fps);
     }
 
     /// Create base file name for output files.
@@ -181,11 +483,17 @@ Trackball::Trackball(string cfg_fn, string src_override)
     double vfov = -1;
     if (!_cfg.getDbl("vfov", vfov) || (vfov <= 0)) {
         LOG_ERR("Error! Camera vertical FoV parameter specified in the config file (vfov) is invalid!");
+        _failed = true;
         _active = false;
         return;
     }
     bool fisheye = false;
-    if (_cfg.getBool("fisheye", fisheye) && fisheye) {
+    if (_cfg.hasKey("fisheye") && !_cfg.getBool("fisheye", fisheye)) {
+        _failed = true;
+        _active = false;
+        return;
+    }
+    if (fisheye) {
         _src_model = CameraModel::createFisheye(source->getWidth(), source->getHeight(), vfov * CM_D2R / (double)source->getHeight(), 360 * CM_D2R);
     }
     else {
@@ -195,7 +503,15 @@ Trackball::Trackball(string cfg_fn, string src_override)
 
     /// Dimensions - quality defaults to 6 (remap_dim 60x60, sphere_dim 180x90).
     int q_factor = Q_FACTOR_DEFAULT;
-    if (!_cfg.getInt("q_factor", q_factor) || (q_factor <= 0)) {
+    if (_cfg.hasKey("q_factor")) {
+        if (!_cfg.getInt("q_factor", q_factor) || (q_factor <= 0)) {
+            fail_invalid_config_value("q_factor", "expected a positive integer");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Resolution parameter specified in the config file (q_factor) is invalid! Using default value (%d).", q_factor);
         _cfg.add("q_factor", q_factor);
     }
@@ -262,6 +578,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
         }
         else {
             LOG_ERR("Error! Sphere ROI configuration specified in config file (roi_circ, roi_c, roi_r) is invalid!");
+            _failed = true;
             _active = false;
             return;
         }
@@ -300,11 +617,13 @@ Trackball::Trackball(string cfg_fn, string src_override)
             }
             else {
                 LOG_ERR("Error! Camera-to-lab coordinate tranformation specified in config file (c2a_r) is invalid!");
+                _failed = true;
                 _active = false;
                 return;
             }
         } else {
             LOG_ERR("Error! Camera-to-lab coordinate tranformation specified in config file (c2a_r) is invalid!");
+            _failed = true;
             _active = false;
             return;
         }
@@ -336,6 +655,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
             _sphere_template = cv::imread(sphere_template_fn, 0);
             if ((_sphere_template.cols != _map_w) || (_sphere_template.rows != _map_h)) {
                 LOG_ERR("Error! Sphere map template specified in the config file (sphere_map_fn) is invalid (%dx%d)!", _sphere_template.cols, _sphere_template.rows);
+                _failed = true;
                 _active = false;
                 return;
             }
@@ -366,42 +686,105 @@ Trackball::Trackball(string cfg_fn, string src_override)
 
     /// Read config params.
     double tol = OPT_TOL_DEFAULT;
-    if (!_cfg.getDbl("opt_tol", tol) || (tol <= 0)) {
+    if (_cfg.hasKey("opt_tol")) {
+        if (!_cfg.getDbl("opt_tol", tol) || (tol <= 0)) {
+            fail_invalid_config_value("opt_tol", "expected a positive floating-point value");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for opt_tol (%f).", tol);
         _cfg.add("opt_tol", tol);
     }
     double bound = OPT_BOUND_DEFAULT;
-    if (!_cfg.getDbl("opt_bound", bound) || (bound <= 0)) {
+    if (_cfg.hasKey("opt_bound")) {
+        if (!_cfg.getDbl("opt_bound", bound) || (bound <= 0)) {
+            fail_invalid_config_value("opt_bound", "expected a positive floating-point value");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for opt_bound (%f).", bound);
         _cfg.add("opt_bound", bound);
     }
     int max_evals = OPT_MAX_EVAL_DEFAULT;
-    if (!_cfg.getInt("opt_max_evals", max_evals) || (max_evals <= 0)) {
+    if (_cfg.hasKey("opt_max_evals")) {
+        if (!_cfg.getInt("opt_max_evals", max_evals) || (max_evals <= 0)) {
+            fail_invalid_config_value("opt_max_evals", "expected a positive integer");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for opt_max_eval (%d).", max_evals);
         _cfg.add("opt_max_evals", max_evals);
     }
     _do_global_search = OPT_GLOBAL_SEARCH_DEFAULT;
-    if (!_cfg.getBool("opt_do_global", _do_global_search)) {
+    if (_cfg.hasKey("opt_do_global")) {
+        if (!_cfg.getBool("opt_do_global", _do_global_search)) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for opt_do_global (%d).", _do_global_search);
         _cfg.add("opt_do_global", _do_global_search ? "y" : "n");
     }
     _max_bad_frames = OPT_MAX_BAD_FRAMES_DEFAULT;
-    if (!_cfg.getInt("max_bad_frames", _max_bad_frames)) {
+    if (_cfg.hasKey("max_bad_frames")) {
+        if (!_cfg.getInt("max_bad_frames", _max_bad_frames) || (_max_bad_frames < -1)) {
+            fail_invalid_config_value("max_bad_frames", "expected an integer >= -1");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for max_bad_frames (%d).", _max_bad_frames);
         _cfg.add("max_bad_frames", _max_bad_frames);
     }
     _error_thresh = -1;
-    if (!_cfg.getDbl("opt_max_err", _error_thresh) || (_error_thresh < 0)) {
+    if (_cfg.hasKey("opt_max_err")) {
+        if (!_cfg.getDbl("opt_max_err", _error_thresh) || (_error_thresh < -1)) {
+            fail_invalid_config_value("opt_max_err", "expected a floating-point value >= -1");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! No optimisation error threshold specified in config file (opt_max_err) - poor matches will not be dropped!");
         _cfg.add("opt_max_err", _error_thresh);
     }
     double thresh_ratio = THRESH_RATIO_DEFAULT;
-    if (!_cfg.getDbl("thr_ratio", thresh_ratio)) {
+    if (_cfg.hasKey("thr_ratio")) {
+        if (!_cfg.getDbl("thr_ratio", thresh_ratio) || (thresh_ratio <= 0)) {
+            fail_invalid_config_value("thr_ratio", "expected a positive floating-point value");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for thr_ratio (%f).", thresh_ratio);
         _cfg.add("thr_ratio", thresh_ratio);
     }
     double thresh_win_pc = THRESH_WIN_PC_DEFAULT;
-    if (!_cfg.getDbl("thr_win_pc", thresh_win_pc)) {
+    if (_cfg.hasKey("thr_win_pc")) {
+        if (!_cfg.getDbl("thr_win_pc", thresh_win_pc) || (thresh_win_pc < 0) || (thresh_win_pc > 1.0)) {
+            fail_invalid_config_value("thr_win_pc", "expected a floating-point value in [0, 1]");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for thr_win_pc (%f).", thresh_win_pc);
         _cfg.add("thr_win_pc", thresh_win_pc);
     }
@@ -428,9 +811,25 @@ Trackball::Trackball(string cfg_fn, string src_override)
 
     int sock_port = SOCK_PORT_DEFAULT;
     _do_sock_output = false;
-    if (_cfg.getInt("sock_port", sock_port) && (sock_port > 0)) {
+    if (_cfg.hasKey("sock_port")) {
+        if (!_cfg.getInt("sock_port", sock_port) || (sock_port < -1) || (sock_port > 65535)) {
+            fail_invalid_config_value("sock_port", "expected an integer in [-1, 65535]");
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    if (sock_port > 0) {
         string sock_host = SOCK_HOST_DEFAULT;
-        if (!_cfg.getStr("sock_host", sock_host)) {
+        if (_cfg.hasKey("sock_host")) {
+            if (!_cfg.getStr("sock_host", sock_host) || sock_host.empty()) {
+                fail_invalid_config_value("sock_host", "expected a non-empty host string");
+                _failed = true;
+                _active = false;
+                return;
+            }
+        }
+        else {
             LOG_WRN("Warning! Using default value for sock_host (%s).", sock_host.c_str());
             _cfg.add("sock_host", sock_host);
         }
@@ -438,6 +837,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
         _data_sock = make_unique<Recorder>(RecorderInterface::RecordType::SOCK, sock_host + ":" + std::to_string(sock_port));
         if (!_data_sock->is_active()) {
             LOG_ERR("Error! Unable to open output data socket (%s:%d).", sock_host.c_str() ,sock_port);
+            _failed = true;
             _active = false;
             return;
         }
@@ -448,7 +848,15 @@ Trackball::Trackball(string cfg_fn, string src_override)
     _do_com_output = false;
     if (com_port.length() > 0) {
         int com_baud = COM_BAUD_DEFAULT;
-        if (!_cfg.getInt("com_baud", com_baud)) {
+        if (_cfg.hasKey("com_baud")) {
+            if (!_cfg.getInt("com_baud", com_baud) || (com_baud <= 0)) {
+                fail_invalid_config_value("com_baud", "expected a positive integer");
+                _failed = true;
+                _active = false;
+                return;
+            }
+        }
+        else {
             LOG_WRN("Warning! Using default value for com_baud (%d).", com_baud);
             _cfg.add("com_baud", com_baud);
         }
@@ -456,6 +864,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
         _data_com = make_unique<Recorder>(RecorderInterface::RecordType::COM, com_port + "@" + std::to_string(com_baud));
         if (!_data_com->is_active()) {
             LOG_ERR("Error! Unable to open output data com port (%s@%d).", com_port.c_str(), com_baud);
+            _failed = true;
             _active = false;
             return;
         }
@@ -464,17 +873,42 @@ Trackball::Trackball(string cfg_fn, string src_override)
 
     /// Display.
     _do_display = DO_DISPLAY_DEFAULT;
-    if (!_cfg.getBool("do_display", _do_display)) {
+    if (_cfg.hasKey("do_display")) {
+        if (!_cfg.getBool("do_display", _do_display)) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for do_display (%d).", _do_display);
         _cfg.add("do_display", _do_display ? "y" : "n");
     }
     _save_raw = SAVE_RAW_DEFAULT;
-    if (!source->isLive() || !_cfg.getBool("save_raw", _save_raw)) {
+    if (_cfg.hasKey("save_raw")) {
+        if (!_cfg.getBool("save_raw", _save_raw)) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else if (!source->isLive()) {
+        LOG_WRN("Warning! Using default value for save_raw (%d).", _save_raw);
+        _cfg.add("save_raw", _save_raw ? "y" : "n");
+    }
+    else {
         LOG_WRN("Warning! Using default value for save_raw (%d).", _save_raw);
         _cfg.add("save_raw", _save_raw ? "y" : "n");
     }
     _save_debug = SAVE_DEBUG_DEFAULT;
-    if (!_cfg.getBool("save_debug", _save_debug)) {
+    if (_cfg.hasKey("save_debug")) {
+        if (!_cfg.getBool("save_debug", _save_debug)) {
+            _failed = true;
+            _active = false;
+            return;
+        }
+    }
+    else {
         LOG_WRN("Warning! Using default value for save_debug (%d).", _save_debug);
         _cfg.add("save_debug", _save_debug ? "y" : "n");
     }
@@ -488,6 +922,21 @@ Trackball::Trackball(string cfg_fn, string src_override)
         // find codec
         int fourcc = 0;
         string cstr = _cfg("vid_codec"), fext;
+        if (!cstr.empty()) {
+            bool found_codec = false;
+            for (const auto& codec : CODECS) {
+                if (cstr.compare(codec[0]) == 0) {
+                    found_codec = true;
+                    break;
+                }
+            }
+            if (!found_codec) {
+                fail_invalid_config_value("vid_codec", "expected one of h264, xvid, mpg4, mjpg, raw");
+                _failed = true;
+                _active = false;
+                return;
+            }
+        }
         for (auto codec : CODECS) {
             if (cstr.compare(codec[0]) == 0) {  // found the codec
                 if (cstr.compare("raw") != 0) { // codec isn't RAW
@@ -516,6 +965,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
             }
             LOG_DBG("Opening %s for chunked raw frame writing (%dx%d @ %f FPS)", (_base_fn + "-raw-" + exec_time).c_str(), source->getWidth(), source->getHeight(), fps);
             if (!openRawFrameRecording(exec_time, source->getWidth(), source->getHeight(), fps)) {
+                _failed = true;
                 _active = false;
                 return;
             }
@@ -532,6 +982,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
             _debug_vid.open(vid_fn, fourcc, fps, cv::Size(4 * DRAW_CELL_DIM, 3 * DRAW_CELL_DIM));
             if (!_debug_vid.isOpened()) {
                 LOG_ERR("Error! Unable to open debug output video (%s).", vid_fn.c_str());
+                _failed = true;
                 _active = false;
                 return;
             }
@@ -543,6 +994,7 @@ Trackball::Trackball(string cfg_fn, string src_override)
             _vid_frames = make_unique<Recorder>(RecorderInterface::RecordType::FILE, fn);
             if (!_vid_frames->is_active()) {
                 LOG_ERR("Error! Unable to open output video frame number log file (%s).", fn.c_str());
+                _failed = true;
                 _active = false;
                 return;
             }
@@ -556,8 +1008,28 @@ Trackball::Trackball(string cfg_fn, string src_override)
         _roi_mask,
         thresh_ratio,
         thresh_win_pc,
-        _cfg("thr_rgb_tfrm")
+        ([&]() {
+            const string transform = _cfg("thr_rgb_tfrm");
+            if (!transform.empty()) {
+                const bool valid_transform =
+                    (transform == "red") || (transform == "r")
+                    || (transform == "green") || (transform == "g")
+                    || (transform == "blue") || (transform == "b")
+                    || (transform == "grey") || (transform == "gray");
+                if (!valid_transform) {
+                    fail_invalid_config_value("thr_rgb_tfrm", "expected red/r, green/g, blue/b, or grey/gray");
+                    _failed = true;
+                    _active = false;
+                    return string();
+                }
+            }
+            return transform;
+        })()
     );
+
+    if (!_active) {
+        return;
+    }
 
     /// Data.
     reset();
@@ -889,6 +1361,7 @@ void Trackball::process()
 
         if (_save_raw && !writeRawFrameRecord(_src_frame, _data.cnt)) {
             LOG_ERR("Error! Unable to persist raw frame stream.");
+            _failed = true;
             terminate();
         }
 

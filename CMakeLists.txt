@@ -191,6 +191,11 @@ if(BUILD_TESTING)
     target_link_libraries(config_no_rewrite_test fictrac_core)
     add_dependencies(config_no_rewrite_test fictrac_core)
     add_test(NAME config_no_rewrite_test COMMAND config_no_rewrite_test)
+
+    add_executable(config_value_validation_test ${PROJECT_SOURCE_DIR}/tests/config_value_validation_test.cpp)
+    target_link_libraries(config_value_validation_test fictrac_core)
+    add_dependencies(config_value_validation_test fictrac_core)
+    add_test(NAME config_value_validation_test COMMAND config_value_validation_test)
 endif()
 
 if(WIN32)
