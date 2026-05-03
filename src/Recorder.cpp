@@ -17,7 +17,7 @@
 using namespace std;
 
 Recorder::Recorder(RecorderInterface::RecordType type, string fn)
-    : _active(false)
+    : _active(false), _accepting_messages(false), _write_failed(false)
 {
     /// Set record type.
     switch (type) {
@@ -40,6 +40,7 @@ Recorder::Recorder(RecorderInterface::RecordType type, string fn)
     /// Open record and start async recording.
     if (_record && _record->openRecord(fn)) {
         _active = true;
+        _accepting_messages = true;
         _thread = make_unique<thread>(&Recorder::processMsgQ, this);
     }
     else {
@@ -52,12 +53,18 @@ Recorder::~Recorder()
     cout << "Closing recorder.." << endl;
 
     unique_lock<mutex> l(_qMutex);
-    _active = false;
+    _accepting_messages = false;
     _qCond.notify_all();
     l.unlock();
 
     if (_thread && _thread->joinable()) {
         _thread->join();
+    }
+
+    _active = false;
+
+    if (_write_failed) {
+        cerr << "Error! Recorder closed after one or more write failures." << endl;
     }
 
     /// _record->close() called by unique_ptr dstr.
@@ -67,7 +74,7 @@ bool Recorder::addMsg(string msg)
 {
     bool ret = false;
     lock_guard<mutex> l(_qMutex);
-    if (_active) {
+    if (_accepting_messages) {
         _msgQ.push_back(msg);
         _qCond.notify_all();
         ret = true;
@@ -84,22 +91,33 @@ void Recorder::processMsgQ()
 
     /// Get a un/lockable lock.
     unique_lock<mutex> l(_qMutex);
-    while (_active) {
+    while (_accepting_messages || !_msgQ.empty()) {
         while (_msgQ.size() == 0) {
+            if (!_accepting_messages) {
+                _active = false;
+                return;
+            }
             _qCond.wait(l);
-            if (!_active) { break; }
         }
 
-        /// Process msg queue. Ignore _active while we have message still to process.
+        /// Process queued messages before allowing the worker to exit.
         while (_msgQ.size() > 0) {
             string msg = _msgQ.front();
             _msgQ.pop_front();
             l.unlock();
 
             // do async i/o
-            _record->writeRecord(msg);
+            try {
+                if (!_record->writeRecord(msg)) {
+                    _write_failed = true;
+                }
+            }
+            catch (...) {
+                _write_failed = true;
+            }
             l.lock();
         }
     }
-    l.unlock();
+
+    _active = false;
 }

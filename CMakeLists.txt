@@ -1,6 +1,8 @@
 cmake_minimum_required (VERSION 3.5)
 project (FicTrac)
 
+include(CTest)
+
 # The version number.
 set(FICTRAC_VERSION_MAJOR 2)
 set(FICTRAC_VERSION_MIDDLE 1)
@@ -178,6 +180,13 @@ target_link_libraries(configGui fictrac_core)
 add_dependencies(configGui fictrac_core)
 target_link_libraries(fictrac fictrac_core)
 add_dependencies(fictrac fictrac_core)
+
+if(BUILD_TESTING)
+    add_executable(recorder_drain_test ${PROJECT_SOURCE_DIR}/tests/recorder_drain_test.cpp)
+    target_link_libraries(recorder_drain_test fictrac_core)
+    add_dependencies(recorder_drain_test fictrac_core)
+    add_test(NAME recorder_drain_test COMMAND recorder_drain_test)
+endif()
 
 if(WIN32)
     sync_runtime_binary(configGui "configGui.exe")

@@ -6,6 +6,7 @@
 
 - Windows-triggered FicTrac fork update package refreshed from the validated MultiBiOS vendor tree.
 - Native sample-video parity regression test for the bundled offline sample input.
+- Native recorder shutdown regression test covering queued-write drain behavior during teardown.
 
 ### Changed
 
@@ -21,6 +22,7 @@
 ### Fixed
 
 - Spinnaker 4.x image conversion compatibility in the USB3 camera path.
+- Async recorder teardown now drains queued messages before exit so final log, data, socket, serial, and sidecar writes are not dropped during shutdown.
 - null-image cleanup during failed frame grabs.
 - ConfigGUI keep/reconfigure prompts no longer freeze the window while waiting for terminal-style input.
 - ConfigGUI compact footer/help overlays wrap correctly and avoid the previous oversized instruction panel behavior.
