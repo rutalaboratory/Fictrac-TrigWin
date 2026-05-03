@@ -559,9 +559,6 @@ Trackball::Trackball(string cfg_fn, string src_override)
         _cfg("thr_rgb_tfrm")
     );
 
-    /// Write all parameters back to config file.
-    _cfg.write();
-
     /// Data.
     reset();
 

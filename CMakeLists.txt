@@ -1,6 +1,8 @@
 cmake_minimum_required (VERSION 3.5)
 project (FicTrac)
 
+include(CTest)
+
 # The version number.
 set(FICTRAC_VERSION_MAJOR 2)
 set(FICTRAC_VERSION_MIDDLE 1)
@@ -178,6 +180,18 @@ target_link_libraries(configGui fictrac_core)
 add_dependencies(configGui fictrac_core)
 target_link_libraries(fictrac fictrac_core)
 add_dependencies(fictrac fictrac_core)
+
+if(BUILD_TESTING)
+    add_executable(config_parser_hardening_test ${PROJECT_SOURCE_DIR}/tests/config_parser_hardening_test.cpp)
+    target_link_libraries(config_parser_hardening_test fictrac_core)
+    add_dependencies(config_parser_hardening_test fictrac_core)
+    add_test(NAME config_parser_hardening_test COMMAND config_parser_hardening_test)
+
+    add_executable(config_no_rewrite_test ${PROJECT_SOURCE_DIR}/tests/config_no_rewrite_test.cpp)
+    target_link_libraries(config_no_rewrite_test fictrac_core)
+    add_dependencies(config_no_rewrite_test fictrac_core)
+    add_test(NAME config_no_rewrite_test COMMAND config_no_rewrite_test)
+endif()
 
 if(WIN32)
     sync_runtime_binary(configGui "configGui.exe")
